@@ -2,7 +2,7 @@
 #
 # ~/scripts/colorscheme
 
-# use wallpaper for pywal colorscheme and set new wallpaper
+# set catppuccin-mocha colorscheme with pywal
 wal --theme catppuccin-mocha -n -s -t
 
 # reload xrdb for dwm
