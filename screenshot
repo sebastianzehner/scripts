@@ -1,0 +1,101 @@
+#!/usr/bin/env bash
+# Screenshot utility using import, xdotool, dmenu, and notify-send.
+# Usage: screenshot [full|window|area]
+# Run without arguments to use dmenu interface or 'Alt' + 'Shift' + '5' in dwm.
+
+# Check for required commands
+REQUIRED_CMDS=("import" "xdotool" "dmenu" "notify-send")
+for cmd in "${REQUIRED_CMDS[@]}"; do
+    if ! command -v "$cmd" >/dev/null 2>&1; then
+        echo "Error: Required command '$cmd' not found in PATH." >&2
+        exit 1
+    fi
+done
+
+# Load XDG user dirs locally
+USER_DIRS="${XDG_CONFIG_HOME:-$HOME/.config}/user-dirs.dirs"
+[ -f "$USER_DIRS" ] && source "$USER_DIRS"
+
+# Define screenshot directory using XDG standard
+OUTDIR="${XDG_PICTURES_DIR:-$HOME/Pictures}/screenshots"
+mkdir -p "$OUTDIR"
+
+# Filename with timestamp
+TIMESTAMP=$(date '+%Y%m%d_%H%M%S')
+FILENAME="${OUTDIR}/${TIMESTAMP}.png"
+
+# Take screenshot based on given mode
+take_screenshot() {
+    case "$1" in
+        full)
+            import -window root "$FILENAME" && send_notification ;;
+        window)
+            # Get active window ID using xdotool
+            WIN_ID=$(xdotool getactivewindow 2>/dev/null)
+            if [ -n "$WIN_ID" ]; then
+                import -window "$WIN_ID" "$FILENAME" && send_notification
+            else
+                notify-send "No active window detected"
+                exit 1
+            fi
+            ;;
+        area)
+            import "$FILENAME" && send_notification ;;
+        help)
+            echo "Usage: screenshot [full|window|area]"
+            echo "Or run without arguments to use dmenu interface."
+            ;;
+        *)
+            echo "Invalid option" && exit 1 ;;
+    esac
+}
+
+colorpicker() {
+    # Dependencies: magick, xsel, slop
+    for cmd in magick xsel slop; do
+        command -v "$cmd" >/dev/null 2>&1 || { notify-send "Missing: $cmd"; return 1; }
+    done
+
+    TMP="$(mktemp --suffix=.png)"
+    trap '[[ -f "$TMP" ]] && rm -f "$TMP"' EXIT
+
+    # Select a small area using slop
+    GEOM=$(slop -t 0) || return 1
+
+    # Screenshot of selected area
+    import -window root -crop "$GEOM" "$TMP"
+
+    # Extract hex color
+    HEX=$(magick "$TMP" -scale 1x1\! -format "#%[hex:p{0,0}]" info: 2>/dev/null || echo "#??????")
+
+    # Copy to clipboard
+    #echo "$HEX" | xsel -b -i
+    printf "%s\n" "$HEX" | xsel -b -i
+
+    # Notification with preview
+    notify-send -i "$TMP" "Color picked: $HEX"
+}
+
+send_notification() {
+    if [ -s "$FILENAME" ]; then
+        notify-send "Screenshot saved" "$(basename "$FILENAME")"
+    else
+        notify-send "Screenshot failed" "$FILENAME"
+    fi
+}
+
+# Show dmenu if no argument is passed
+# Delay to allow dmenu to close before capturing
+if [ -z "$1" ]; then
+    CHOICE=$(printf " \nFull Screen\nSelect Area\nActive Window\n \nColor Picker\n \nGoto  record" | dmenu -noi -c -bw 2 -l 8 -p "󰹑 screenshot" -i -nb "#11111b" -nf "#a6adc8" -sb "#1e1e2e" -sf "#cdd6f4")
+    case "$CHOICE" in
+        "Full Screen")       (sleep 0.3 && take_screenshot full) & ;;
+        "Select Area")       (sleep 0.3 && take_screenshot area) & ;;
+        "Active Window")     (sleep 0.3 && take_screenshot window) & ;;
+        "Color Picker")      (sleep 0.3 && colorpicker) & ;;
+        "Goto  record")          record & ;;
+        *)                   exit 0 ;;
+    esac
+else
+    take_screenshot "$1"
+fi

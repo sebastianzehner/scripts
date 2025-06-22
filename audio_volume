@@ -1,0 +1,154 @@
+#!/usr/bin/env bash
+#
+# PipeWire Audio Volume Control Script for dwm/dwmblocks
+#
+# Features:
+# - Controls volume and mute via wpctl (PipeWire)
+# - Sends notifications via dunst with volume icons
+# - Signals dwmblocks to update the volume block
+#
+# Dependencies: wpctl, notify-send, dunst, pidof, awk, grep
+#
+# Author: Sebastian Zehner
+# License: GPL-3.0
+# Last updated: 2025-06-19
+
+# Define the default audio sink used by wpctl.
+# This allows PipeWire to dynamically resolve the currently active output device.
+SINK="@DEFAULT_AUDIO_SINK@"
+
+# Define the directory where volume icons are stored
+ICON_PATH="$HOME/scripts/icons"
+
+# Volume limit (1.0 = 100%)
+MAX_VOLUME=100
+
+# Ensure required commands are available
+for cmd in wpctl notify-send sigdwmblocks awk grep; do
+  if ! command -v "$cmd" >/dev/null 2>&1; then
+    echo "Error: '$cmd' is not installed or not in PATH." >&2
+    exit 1
+  fi
+done
+
+# Retrieve the current volume level as an integer percentage (e.g., 42).
+get_volume() {
+  wpctl get-volume "$SINK" | awk '{print int($2 * 100)}'
+}
+
+# Check whether the current sink is muted.
+is_muted() {
+  wpctl get-volume "$SINK" | grep -q MUTED
+}
+
+# Send a desktop notification using `notify-send` and `dunst`.
+# It includes a volume bar hint if unmuted, or a muted message.
+# Use a "stacking tag" to replace any existing volume notification.
+send_notification() {
+  VOLUME=$(get_volume)
+  if is_muted; then
+    # Notify muted with stacking tag
+    notify-send \
+      -u low \
+      -i "$ICON_PATH/volume-mute-#cdd6f4.svg" \
+      -h string:x-dunst-stack-tag:volume \
+      -h int:value:0 \
+      "Muted"
+  else
+    if [ "$VOLUME" -eq 0 ]; then
+      ICON="volume-off-#cdd6f4.svg"
+    elif [ "$VOLUME" -lt 30 ]; then
+      ICON="volume-low-#cdd6f4.svg"
+    elif [ "$VOLUME" -lt 70 ]; then
+      ICON="volume-medium-#cdd6f4.svg"
+    else
+      ICON="volume-high-#cdd6f4.svg"
+    fi
+    # Notify volume with stacking tag and value
+    notify-send \
+      -u low \
+      -i "$ICON_PATH/$ICON" \
+      -h string:x-dunst-stack-tag:volume \
+      -h int:value:"$VOLUME" \
+      "Volume"
+  fi
+}
+
+# Signal dwmblocks to update the volume block.
+# This assumes the volume block in dwmblocks is configured to use signal 2.
+signal_dwmblocks() {
+  sigdwmblocks 2
+}
+
+# Main command dispatcher based on argument
+case "$1" in
+  up)
+    # If muted, unmute the audio sink first
+    if is_muted; then
+      wpctl set-mute "$SINK" 0
+    fi
+    # Then increase volume by 5% but not more than 100%
+    CURRENT=$(get_volume)
+    if [ "$CURRENT" -lt "$MAX_VOLUME" ]; then
+      wpctl set-volume "$SINK" 5%+
+    fi
+    ;;
+  down)
+    # Decrease volume by 5%
+    wpctl set-volume "$SINK" 5%-
+    ;;
+  mute)
+    # Toggle mute on/off
+    wpctl set-mute "$SINK" toggle
+    ;;
+  set)
+    # If muted, unmute the audio sink first
+    if is_muted; then
+      wpctl set-mute "$SINK" 0
+    fi
+    # Set volume to a specific percentage (clamped between 0 and MAX_VOLUME)
+    TARGET="$2"
+    if ! [[ "$TARGET" =~ ^[0-9]+$ ]]; then
+      echo "Error: Please provide a numeric volume value (e.g., 50)." >&2
+      exit 1
+    fi
+    if [ "$TARGET" -gt "$MAX_VOLUME" ]; then
+      TARGET="$MAX_VOLUME"
+    fi
+    wpctl set-volume "$SINK" "$TARGET"% >/dev/null
+    ;;
+  notify)
+    # Send notification only (no volume change)
+    send_notification
+    exit 0
+    ;;
+  status)
+    # Output current volume status for use in dwmblocks
+    if is_muted; then
+      echo "  Mute"
+    else
+      VOL=$(get_volume)
+      if [ "$VOL" -eq 0 ]; then
+        ICON=" " # Volume off
+      elif [ "$VOL" -lt 30 ]; then
+        ICON=" " # Low volume
+      elif [ "$VOL" -lt 70 ]; then
+        ICON=" " # Medium volume
+      else
+        ICON=" " # High volume
+      fi
+      echo "$ICON $VOL%"
+    fi
+    exit 0
+    ;;
+  *)
+    # Default help output if invalid argument is given
+    echo "Usage: audio_volume {up|down|mute|notify|status|set <value>}"
+    exit 0
+    ;;
+esac
+
+# After changing the volume or mute state, show a notification...
+send_notification
+# ...and trigger an update of the dwmblocks volume block.
+signal_dwmblocks

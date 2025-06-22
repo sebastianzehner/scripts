@@ -1,0 +1,5 @@
+#!/usr/bin/env bash
+#
+# Start Minecraft 1.21.4 and connect to the server
+#
+prismlauncher --launch 1.21.4 --server 192.168.7.40

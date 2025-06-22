@@ -1,0 +1,22 @@
+#!/usr/bin/env bash
+
+function powermenu {
+	options="Cancel\nLock\nQuit\nReboot\nPoweroff"	
+  	selected=$(echo -e $options | dmenu -noi -c -bw 2 -l 5 -p " powermenu" -i -nb "#11111b" -nf "#a6adc8" -sb "#1e1e2e" -sf "#cdd6f4")
+
+	if [[ $selected = "Poweroff" ]]; then
+		#doas /sbin/poweroff # alpine linux
+		sudo systemctl poweroff # arch linux
+	elif [[ $selected = "Reboot" ]]; then
+		#doas /sbin/reboot # alpine linux
+		sudo systemctl reboot # arch linux
+	elif [[ $selected = "Lock" ]]; then
+		slock -m "$(printf "%s\n Locked at %s" "$(figlet 'Lock Screen')" "$(date "+%a %d, %H:%M:%S")")"
+	elif [[ $selected = "Quit" ]]; then
+    xdotool key --clearmodifiers alt+shift+q
+	elif [[ $selected = "Cancel" ]]; then
+		return
+	fi
+}
+
+powermenu

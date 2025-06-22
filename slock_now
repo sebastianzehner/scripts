@@ -1,0 +1,4 @@
+#!/usr/bin/env bash
+
+# start slock with timestamped message
+slock -m "$(printf "%s\n Locked at %s" "$(figlet 'Lock Screen')" "$(date "+%a %d, %H:%M:%S")")"

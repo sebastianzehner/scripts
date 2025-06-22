@@ -1,0 +1,9 @@
+#!/usr/bin/env bash
+#
+# ~/scripts/colorscheme
+
+# use wallpaper for pywal colorscheme and set new wallpaper
+wal --theme catppuccin-mocha -n -s -t
+
+# reload xrdb for dwm
+xsetroot -name "fsignal:2"

@@ -1,0 +1,184 @@
+#!/usr/bin/env bash
+# Screen recording utility using ffmpeg, amixer, dmenu, notify-send
+# Usage: record [screen|area|window|stop|help]
+
+# --- Configuration ---
+AUDIO_SRC="default"  # Use 'pactl list sources' to find correct input
+FRAMERATE=30
+CODEC_VID="libx264"
+CODEC_AUD="aac"
+PRESET="ultrafast"
+OVERSCAN=10 # used only in record_window
+
+init_paths() {
+    # Load XDG user dirs for standard folders
+    USER_DIRS="${XDG_CONFIG_HOME:-$HOME/.config}/user-dirs.dirs"
+    [ -f "$USER_DIRS" ] && source "$USER_DIRS"
+
+    # Define paths and filenames
+    XDG_CACHE_HOME="${XDG_CACHE_HOME:-$HOME/.cache}"
+    PID_FILE="$XDG_CACHE_HOME/screenrecord.pid"
+    STATE_FILE="$XDG_CACHE_HOME/screenrecord.state"
+    OUTDIR="${XDG_VIDEOS_DIR:-$HOME/Videos}/recordings"
+    mkdir -p "$OUTDIR"
+    FILENAME="${OUTDIR}/$(date +%F_%H-%M-%S).mkv"
+}
+
+# Check required commands
+REQUIRED_CMDS=("ffmpeg" "amixer" "dmenu" "xdotool" "xdpyinfo" "slop" "notify-send")
+for cmd in "${REQUIRED_CMDS[@]}"; do
+    if ! command -v "$cmd" >/dev/null 2>&1; then
+        echo "Missing: $cmd" >&2
+        notify-send "Missing tool" "$cmd" || true
+        exit 1
+    fi
+done
+
+# Init paths
+init_paths
+
+# --- Helper functions ---
+
+set -euo pipefail
+
+# Error messages
+err() {
+    echo "Error: $*" >&2
+    notify-send "Error: $*" || true
+}
+
+# Update dwmblocks
+update_status() {
+    sigdwmblocks 6
+}
+
+# Define cleanup early
+cleanup() {
+    rm -f "$PID_FILE" "$STATE_FILE"
+    update_status
+}
+
+# Function returns PID if recording is running, empty otherwise
+is_recording_running() {
+    if [ -f "$PID_FILE" ]; then
+        local pid
+        pid=$(cat "$PID_FILE")
+        if ps -p "$pid" > /dev/null 2>&1; then
+            echo "$pid"
+            return 0
+        fi
+    fi
+    return 1
+}
+
+# --- Record functions ---
+
+# Start full screen recording
+record_screen() {
+    local geo
+    geo="$(xdpyinfo | awk '/dimensions:/ {print $2}')"
+    start_ffmpeg "$geo" "$DISPLAY" "Recording started ($geo)"
+}
+
+# Start area recording (selection via slop)
+record_area() {
+    read -r X Y W H <<< "$(slop -f "%x %y %w %h")" || { notify-send "Selection cancelled" || true; exit 1; }
+    local geo="${W}x${H}"
+    local input="$DISPLAY+$X,$Y"
+    start_ffmpeg "$geo" "$input" "Recording started ($geo)"
+}
+
+# Start window recording (active window)
+record_window() {
+    WIN_ID=$(xdotool getactivewindow)
+    if ! xwininfo -id "$WIN_ID" >/dev/null 2>&1; then
+        notify-send "Failed to get window info" || true
+        exit 1
+    fi
+    eval "$(xwininfo -id "$WIN_ID" | awk '
+        /Absolute upper-left X:/ { x=$4 }
+        /Absolute upper-left Y:/ { y=$4 }
+        /Width:/ { w=$2 }
+        /Height:/ { h=$2 }
+        END { printf("WIDTH=%s HEIGHT=%s X=%s Y=%s\n", w, h, x, y) }')"
+    #local geo="${WIDTH}x${HEIGHT}"
+    #local input="$DISPLAY+$X,$Y"
+    local geo="$((WIDTH - OVERSCAN))x$((HEIGHT - OVERSCAN))"
+    local input="$DISPLAY+$((X + OVERSCAN / 2)),$((Y + OVERSCAN / 2))"
+    start_ffmpeg "$geo" "$input" "Recording started ($geo)"
+}
+
+# Save PID and state, wait for process to finish
+start_recording() {
+    local pid=$!
+    echo "$pid" > "$PID_FILE"
+    echo "recording" > "$STATE_FILE"
+    update_status
+    if [ -n "$pid" ]; then
+        wait "$pid" || true
+    fi
+    update_status
+}
+
+# Start ffmpeg stream
+start_ffmpeg() {
+    local geometry="$1"
+    ffmpeg -video_size "${geometry}" -framerate "$FRAMERATE" -f x11grab -i "$2" \
+           -f pulse -i "$AUDIO_SRC" -c:v "$CODEC_VID" -preset "$PRESET" -c:a "$CODEC_AUD" "$FILENAME" &
+    notify-send "$3" "$(basename "$FILENAME")" || true
+    echo "$3 → $FILENAME"
+    start_recording
+}
+
+# --- Control functions ---
+
+# Stop recording
+record_stop() {
+    PID=$(is_recording_running)
+    if [ -n "$PID" ]; then
+        if kill "$PID"; then
+            notify-send "Recording stopped" "$(basename "$FILENAME")" || true
+            echo "Recording stopped → $FILENAME"
+            cleanup
+            exit 0
+        else
+            err "Failed to stop recording"
+            exit 1
+        fi
+    else
+        err "No recording in progress"
+        exit 1
+    fi
+}
+
+# --- Help ---
+
+# Help message
+show_help() {
+    echo "Usage: record [screen|area|window|stop|help]"
+    echo "No argument opens dmenu prompt"
+    exit 0
+}
+
+# --- Main logic ---
+
+# If no argument, show dmenu prompt
+if [ -z "${1:-}" ]; then
+    CHOICE=$(printf " \nFull Screen\nSelect Area\nActive Window\n \nGoto 󰹑 screenshot" | dmenu -noi -c -bw 2 -l 6 -p " record" -i -nb "#11111b" -nf "#a6adc8" -sb "#1e1e2e" -sf "#cdd6f4")
+    case "$CHOICE" in
+        "Full Screen")        record_screen ;;
+        "Select Area")        record_area ;;
+        "Active Window")      record_window ;;
+        "Goto 󰹑 screenshot")  screenshot ;;
+        *)                    exit 0 ;;
+    esac
+else
+    case "${1:-}" in
+        screen)  record_screen ;;
+        area)    record_area ;;
+        window)  record_window ;;
+        stop)    record_stop ;;
+        help)    show_help ;;
+        *)       echo "Invalid option"; exit 1 ;;
+    esac
+fi

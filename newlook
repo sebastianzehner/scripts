@@ -1,0 +1,12 @@
+#!/usr/bin/env bash
+#
+# ~/scripts/newlook
+
+# select random wallpaper from folder
+wall=$(find ~/pictures/wallpaper/ -type f -name "*.jpg" -o -name "*.png" | shuf -n 1)
+
+# use wallpaper for pywal colorscheme and set new wallpaper
+wal --cols16 -s -t -i $wall
+
+# reload xrdb for dwm
+xsetroot -name "fsignal:2"
