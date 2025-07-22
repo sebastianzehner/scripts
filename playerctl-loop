@@ -1,0 +1,16 @@
+#!/bin/sh
+
+# playerctl-loop: watches for MPRIS metadata changes and triggers a dwmblocks update
+
+# Handle termination signals (e.g., shutdown, logout) to exit cleanly
+trap 'exit 0' TERM INT
+
+# Format string for metadata updates
+FORMAT='{{status}} {{artist}} - {{title}}'
+
+# Start playerctl listener and pipe changes line-by-line
+playerctl --follow metadata --format="$FORMAT" | while read -r line; do
+    #echo "Updated: $line" >> /tmp/playerctl-loop.log
+    # Trigger status bar update for music block (e.g., block number 7)
+    sigdwmblocks 7
+done
