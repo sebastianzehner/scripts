@@ -1,0 +1,162 @@
+#!/bin/sh
+
+# Battery Script for uConsole with Arch Linux ARM
+#
+# Monitors battery status via /sys/class/power_supply.
+# Displays charge level, time estimate, and power usage.
+# Formatted output for use with dwmblocks. 
+
+BAT_PATH="/sys/class/power_supply/axp20x-battery"
+AC_PATH="/sys/class/power_supply/axp22x-ac"
+
+# Color codes
+red="\033[31m"
+yellow="\033[33m"
+green="\033[32m"
+reset="\033[0m"
+
+# Shortcuts for file paths
+capacity_file="$BAT_PATH/capacity"
+status_file="$BAT_PATH/status"
+energy_now_file="$BAT_PATH/energy_now"
+energy_full_file="$BAT_PATH/energy_full"
+present_file="$BAT_PATH/present"
+current_now_file="$BAT_PATH/current_now"
+voltage_now_file="$BAT_PATH/voltage_now"
+ac_online_file="$AC_PATH/online"
+
+# Check if battery is present
+[ ! -f "$present_file" ] && echo "󱉝 " && exit 0
+[ "$(cat "$present_file")" = "0" ] && echo "󱉝 " && exit 0
+
+# Read values
+capacity=$(cat "$capacity_file" 2>/dev/null); : "${capacity:=0}"
+status=$(cat "$status_file")
+energy_now=$(cat "$energy_now_file" 2>/dev/null); : "${energy_now:=0}"
+energy_full=$(cat "$energy_full_file" 2>/dev/null); : "${energy_full:=1}"
+ac_online=$(cat "$ac_online_file" 2>/dev/null); : "${ac_online:=0}"
+current_now=$(cat "$current_now_file" 2>/dev/null); : "${current_now:=0}"
+voltage_now=$(cat "$voltage_now_file" 2>/dev/null); : "${voltage_now:=0}"
+
+# Convert units
+mWh_now=$(awk "BEGIN { printf \"%.0f\", $energy_now / 1000 }")
+mWh_full=$(awk "BEGIN { printf \"%.0f\", $energy_full / 1000 }")
+A_now=$(awk "BEGIN { printf \"%.3f\", $current_now / 1000000 }")
+V_now=$(awk "BEGIN { printf \"%.3f\", $voltage_now / 1000000 }")
+
+# Convert from µWh to mAh (assumes 3.6V nominal voltage)
+mAh_now=$(awk "BEGIN { printf \"%.0f\", $energy_now / 3.6 / 1000 }")
+mAh_full=$(awk "BEGIN { printf \"%.0f\", $energy_full / 3.6 / 1000 }")
+
+# Get absolute current in µA
+current_abs=$(awk -v c="$current_now" 'BEGIN { print (c < 0 ? -c : c) }')
+# Power in µW
+power_now=$(awk -v c="$current_abs" -v v="$voltage_now" 'BEGIN { printf "%.0f", c * v / 1000000 }')
+# Power in W
+power_now_watt=$(awk -v c="$current_abs" -v v="$voltage_now" 'BEGIN { printf "%.2f", c * v / 1000000000000 }')
+
+# Add AC plug icon if AC is connected
+[ "$ac_online" = "1" ] && ac_icon="󰚥" && ac_status="󰚥" || ac_status="󰚦 "
+
+# Choose the battery icon
+battery_icon=""
+if [ "$status" = "Charging" ]; then
+    # Charging icons with lightning bolt
+    case $capacity in
+        [0-9]) battery_icon="󰢟 " ;;
+        1[0-9]) battery_icon="󰢜 " ;;
+        2[0-9]) battery_icon="󰂆 " ;;
+        3[0-9]) battery_icon="󰂇 " ;;
+        4[0-9]) battery_icon="󰂈 " ;;
+        5[0-9]) battery_icon="󰢝 " ;;
+        6[0-9]) battery_icon="󰂉 " ;;
+        7[0-9]) battery_icon="󰢞 " ;;
+        8[0-9]) battery_icon="󰂊 " ;;
+        9[0-9]) battery_icon="󰂋 " ;;
+        100) battery_icon="󰂅 " ;;
+    esac
+else
+    # Normal battery icons (discharging or full)
+    case $capacity in
+        [0-9]) battery_icon="󰂎" ;;
+        1[0-9]) battery_icon="󰁺" ;;
+        2[0-9]) battery_icon="󰁻" ;;
+        3[0-9]) battery_icon="󰁼" ;;
+        4[0-9]) battery_icon="󰁽" ;;
+        5[0-9]) battery_icon="󰁾" ;;
+        6[0-9]) battery_icon="󰁿" ;;
+        7[0-9]) battery_icon="󰂀" ;;
+        8[0-9]) battery_icon="󰂁" ;;
+        9[0-9]) battery_icon="󰂂" ;;
+        100) battery_icon="󰁹" ;;
+    esac
+fi
+
+# Color definitions for red (≤20%), yellow (≤40%), green (>50%)
+if [ "$capacity" -le 20 ]; then
+    color="$red"
+    dwmcolor="\x0c"
+elif [ "$capacity" -le 40 ]; then
+    color="$yellow"
+    dwmcolor="\x0e"
+else
+    color="$green"
+    dwmcolor="\x0d"
+fi
+
+print_remaining_time() {
+    if [ "$capacity" -eq 100 ]; then
+        printf "%b󱟢%b Full" "$green" "$reset"
+    elif [ "$status" = "Discharging" ] && [ "$power_now" -gt 0 ]; then
+        hours_left=$(awk -v e="$energy_now" -v p="$power_now" 'BEGIN { printf "%.1f", e / p }')
+        printf "%b󱧥%b %sh remaining" "$green" "$reset" "$hours_left"
+    elif [ "$status" = "Charging" ] && [ "$power_now" -gt 0 ]; then
+        energy_remaining=$(awk -v full="$energy_full" -v now="$energy_now" 'BEGIN { print full - now }')
+        hours_left=$(awk -v r="$energy_remaining" -v p="$power_now" 'BEGIN { printf "%.1f", r / p }')
+        printf "%b󰂄%b %sh until full" "$green" "$reset" "$hours_left"
+    else
+        printf "%b󱟢%b Idle" "$green" "$reset"
+    fi
+}
+
+# Handle CLI arguments
+case "$1" in
+    help)
+        echo "Usage: battery [option]"
+        echo
+        echo "Options:"
+        echo "  (no args)       Show icon and %"
+        echo "  energy          Show icon, %, and mAh current (full)"
+        echo "  time            Show icon and estimated remaining time"
+        echo "  info            Show all values in detail"
+        echo "  dwm             Show icon and % for dwmblocks"
+        echo "  help            Show this help message"
+        exit 0
+        ;;
+    energy)
+        printf "%b%s%b%s %s %b󱟢%b %s%s (%s%s)\n" \
+            "${color}" "$battery_icon" "${reset}" "$ac_icon" \
+            "$capacity%" \
+            "${green}" "${reset}" \
+            "$mAh_now" "mAh" "$mAh_full" "mAh" ;;
+    time)
+        printf "%b%s%b%s %s %s\n" "$color" "$battery_icon" "$reset" "$ac_icon" "$capacity%" "$(print_remaining_time)" ;;
+    info)
+        printf "%-15s %s\n"        "Battery Information"
+        printf "%-15s %s\n"        "-------------------"
+        printf "%-15s %s\n"        "Status:"       "$status"
+        printf "%-15s %s%s %s\n"   "Capacity:"     "$mAh_now" "mAh" "($capacity%)"                                          
+        printf "%-15s %s%s %s%s\n" "Energy:"       "$mWh_now" "mWh" "($mWh_full" "mWh)"
+        printf "%-15s %s%s\n"      "Voltage:"      "$V_now" "V"
+        printf "%-15s %s%s\n"      "Current:"      "$A_now" "A"
+        printf "%-15s %s%s\n"      "Power usage:"  "$power_now_watt" "W"
+        printf "%-15s %b%s%b\n"    "Battery Icon:" "$color" "$battery_icon" "$reset"
+        printf "%-15s %s\n"        "Power Plug:"   "$ac_status"
+        printf "\n"
+        printf "%-15s %s\n" "Remaining Time:" "$(print_remaining_time)"
+        ;;
+    dwm)
+        printf "%b%s\x0b%s %s%%\n" "$dwmcolor" "$battery_icon" "$ac_icon" "$capacity" ;;
+    *)
+        printf "%b%s%b %s %s\n" "${color}" "$battery_icon" "${reset}""$ac_icon" "$capacity%" ;;
+esac
