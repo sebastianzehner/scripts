@@ -1,0 +1,124 @@
+#!/bin/bash
+
+# VPN Manager Script for uConsole (Arch Linux + Wi-Fi)
+#
+# Manages OpenVPN and Twingate connections with split-DNS on the uConsole.
+# Optimized for Arch Linux using Wi-Fi.
+# Supports start and stop commands to enable or disable VPN and DNS settings.
+
+VERSION="1.0"
+SERVICE_US="openvpn-client@AirVPN_America_UDP-443-Entry3.service"
+SERVICE_EU="openvpn-client@AirVPN_Europe_UDP-443-Entry3.service"
+NAME_US="AirVPN America"
+NAME_EU="AirVPN Europe"
+LOCAL_DNS_IP="192.168.7.20"
+SPLIT_DOMAINS=(~techlab.icu ~and.com ~more.com ~domains.com)
+LOCAL_DOMAIN="status.techlab.icu"
+REMOTE_DOMAIN="cloudflare.com"
+
+set_service_eu() {
+    SERVICE=$SERVICE_EU
+    NAME=$NAME_EU
+}
+
+set_service_us() {
+    SERVICE=$SERVICE_US
+    NAME=$NAME_US
+}
+
+start_vpn() {
+    if ip link show tun0 &>/dev/null; then
+        echo "VPN connection already active (tun0 exists)."
+        exit 1
+    fi
+
+    echo "Starting $NAME..."
+    sudo systemctl start "$SERVICE"
+
+    echo "Waiting for tun0 to initialize..."
+    sleep 3
+
+    echo "Checking if local DNS ($LOCAL_DNS_IP) is reachable..."
+    if ping -c1 -W1 "$LOCAL_DNS_IP" &>/dev/null; then
+        echo "✓ Local DNS is reachable – enabling split DNS over wlan0"
+        sudo resolvectl domain wlan0 "${SPLIT_DOMAINS[@]}"
+    else
+        echo "✗ Local DNS not reachable - keeping default VPN DNS settings"
+    fi
+}
+
+stop_vpn() {
+    echo "Stopping VPN..."
+    sudo systemctl stop "$SERVICE_US"
+    sudo systemctl stop "$SERVICE_EU"
+
+    echo "Removing split DNS entries from wlan0..."
+    sudo resolvectl domain wlan0 ""
+}
+
+check_dns() {
+    echo ""
+    resolvectl status
+    echo ""
+    timeout 1s resolvectl query $LOCAL_DOMAIN
+    echo ""
+    timeout 1s resolvectl query $REMOTE_DOMAIN
+}
+
+start_twingate() {
+    twingate start
+}
+
+stop_twingate() {
+    twingate stop
+}
+
+status_twingate() {
+    twingate status
+}
+
+help_message() {
+    echo "VPN Manager Script | v$VERSION"
+    echo "Copyright (C) 2025 TechLab"
+    echo "Licensed under the GNU General Public License v3.0 or later – see LICENSE file for details."
+    echo ""
+    echo "Usage: vpn {start {eu|us}|stop|restart|check|status|twingate {start|stop|status}}" 
+}
+
+# main
+case "$1" in
+    start)
+        case "$2" in
+          eu) set_service_eu && start_vpn ;;
+          us) set_service_us && start_vpn ;;
+          *)  echo "Usage: vpn start {eu|us}" ;;
+        esac
+        ;;
+    stop)
+        stop_vpn
+        ;;
+    restart)
+        stop_vpn
+        start_vpn
+        ;;
+    check)
+        check_dns
+        ;;
+    status)
+        systemctl status "$SERVICE_EU"
+        echo ""
+        systemctl status "$SERVICE_US"
+        ;;
+    twingate)
+        case "$2" in
+            start)  start_twingate ;;
+            stop)   stop_twingate ;;
+            status) status_twingate ;;
+            *)      echo "Usage: vpn twingate {start|stop|status}" ;;
+        esac
+        ;;
+    help)
+        help_message ;;
+    *)
+        help_message ;;
+esac
