@@ -1,0 +1,50 @@
+#!/bin/sh
+
+# Headphone detection for dwmblocks on uConsole (Arch Linux ARM)
+#
+# Polls headphone state via amixer (check card and mixer) every 3s.
+# Sends signal 2 to dwmblocks on state change.
+# Includes initial state setup and sigdwmblocks check.
+
+card=3
+mixer="Headphone"
+dwmblocks_signal=2
+last_status=""
+
+if command -v sigdwmblocks >/dev/null 2>&1; then
+    sigdwmblocks $dwmblocks_signal
+fi
+
+while true; do
+    # Read current headphone plugged-in status from amixer output
+    current_status=$(amixer -c $card get $mixer 2>/dev/null | awk '
+        /Mono: Playback \[on\]/ { print 1; found=1; exit }
+        /Front Left: Playback .* \[on\]/ { left=1 }
+        /Front Right: Playback .* \[on\]/ { right=1 }
+        END {
+            if (!found) {
+                if (left || right) print 1
+                else print 0
+            }
+        }
+    ')
+
+    # Debug output to stderr
+    #echo "$(date +'%Y-%m-%d %H:%M:%S') - $mixer status: $current_status" >&2
+
+    # On first run, initialize last_status to avoid unnecessary signal
+    if [ -z "$last_status" ]; then
+        last_status="$current_status"
+    fi
+
+    # If status changed, signal dwmblocks to update
+    if [ "$current_status" != "$last_status" ]; then
+        if command -v sigdwmblocks >/dev/null 2>&1; then
+            sigdwmblocks $dwmblocks_signal
+        fi
+        last_status="$current_status"
+    fi
+
+    # Sleep for 3 seconds before polling again
+    sleep 3
+done
