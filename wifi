@@ -1,0 +1,335 @@
+#!/bin/bash
+
+# Wi-Fi Status Script for the uConsole (Arch Linux ARM)
+#
+# This shell script displays the current Wi-Fi status as an icon
+# (for use in dwmblocks) or shows detailed connection info via notify-send
+# and terminal output. It detects the active network interface,
+# checks signal strength, internet connectivity, VPN status (including DNS leak check),
+# and Twingate availability. A lockfile prevents simultaneous executions.
+# Optionally, it shows SSID, local and external IP addresses, and more - with icon support via NerdFonts.
+
+# prevent multiple simultaneous calls (e.g., from dwmblocks and terminal)
+LOCK_FILE="/tmp/wifi_status.lock"
+if [ -e "$LOCK_FILE" ]; then
+    # check if process is still running
+    if kill -0 "$(cat "$LOCK_FILE")" 2>/dev/null; then
+        if [ -t 1 ]; then
+            echo "This wifi script is already running. Please try again later."
+        fi
+        exit 0
+    else
+        # stale lockfile (process dead), remove it
+        rm -f "$LOCK_FILE"
+    fi
+fi
+
+# set lockfile
+echo "$$" > "$LOCK_FILE"
+
+# remove lockfile on exit
+trap "rm -f '$LOCK_FILE'" EXIT
+
+# domain for vpn route check
+VPN_CHECK_DOMAIN="cloudflare.com"
+
+# domain for local route check
+LAN_CHECK_DOMAIN="status.techlab.icu"
+
+# signal strength icons (index 0–4)
+BARS_NORMAL=(󰤯 󰤟 󰤢 󰤥 󰤨)
+BARS_WARN=(󰤫 󰤠 󰤣 󰤦 󰤩)
+BARS_LOCKED=(󰤬 󰤡 󰤤 󰤧 󰤪)
+
+# set icon for twingate
+#ICON_TWINGATE="  󱇱 "
+ICON_TWINGATE="  󰅠 "
+
+# required commands
+declare -A CMD_TO_PKG=(
+    [iw]="iw"
+    [ip]="iproute2"
+    [curl]="curl"
+    [dig]="bind"
+    [ping]="iputils"
+    [notify-send]="libnotify"
+    [grep]="grep"
+    [cut]="coreutils"
+)
+
+# check for required commands
+for cmd in "${!CMD_TO_PKG[@]}"; do
+    if ! command -v "$cmd" &>/dev/null; then
+        echo "Missing command: $cmd (Package: ${CMD_TO_PKG[$cmd]})" >&2
+        exit 1
+    fi
+done
+
+# get active interface
+get_active_interface() {
+    if command -v nmcli >/dev/null 2>&1; then
+        nmcli -t -g DEVICE,STATE dev | awk -F: '$2 == "connected" {print $1; exit}'
+    else
+        ip route show default 2>/dev/null | awk '/default/ {print $5; exit}'
+    fi
+}
+
+# get vpn interface
+get_vpn_interface() {
+    ip -o link show | awk -F': ' '/tun[0-9]+|wg[0-9]+/ {print $2}'
+}
+
+# set wifi interface
+INTERFACE=$(get_active_interface)
+
+if [ -z "$INTERFACE" ]; then
+    echo "󰤭"  # no interface found
+    exit 0
+fi
+
+# check if wifi is connected
+is_wifi_connected() {
+    if command -v nmcli >/dev/null; then
+        nmcli -t -f WIFI g | grep -q "enabled" && \
+        nmcli -t -f DEVICE,STATE d | grep -q "^$INTERFACE:connected"
+    else
+        ip link show "$INTERFACE" | grep -q "state UP" && \
+        iw dev "$INTERFACE" link | grep -qv "Not connected"
+    fi
+}
+
+# get signal strength (0–100%)
+get_signal_strength() {
+    if command -v nmcli >/dev/null 2>&1; then
+        # use nmcli if available (returns 0–100)
+        signal=$(nmcli -t -f IN-USE,SIGNAL dev wifi | grep '^\*' | cut -d':' -f2)
+        echo "${signal:-0}"
+    elif command -v iw >/dev/null 2>&1; then
+        # fallback to iw (returns signal in dBm)
+        signal_dbm=$(iw dev "$INTERFACE" link | awk '/signal:/ {print $2}')
+        if [ -n "$signal_dbm" ]; then
+            # convert dBm to percentage: crude approximation
+            signal_quality=$(( (100 + signal_dbm) * 2 ))
+            # clamp between 0 and 100
+            if [ "$signal_quality" -lt 0 ]; then
+                signal_quality=0
+            elif [ "$signal_quality" -gt 100 ]; then
+                signal_quality=100
+            fi
+            echo "$signal_quality"
+        else
+            echo "0"
+        fi
+    else
+        echo "0"
+    fi
+}
+
+# test if internet is reachable
+has_internet() {
+    ping -qc1 -W1 1.1.1.1 &>/dev/null
+}
+
+# return correct wifi icon based on connection and vpn status
+get_wifi_icon() {
+    if ! is_wifi_connected; then
+        echo "󰤭" # not connected
+    else      
+        strength=$(get_signal_strength)  # 0–100
+        index=$((strength / 25))
+        [ $index -gt 4 ] && index=4
+
+        if ! has_internet; then
+            echo "${BARS_WARN[$index]}"
+        elif is_vpn_active; then
+            echo "${BARS_LOCKED[$index]}"
+        else
+            echo "${BARS_NORMAL[$index]}"
+        fi
+    fi
+}
+
+# check if vpn is active and dns is routed through vpn
+is_vpn_active() {
+    # set vpn interface
+    local VPN_INTERFACE
+    VPN_INTERFACE=$(get_vpn_interface)
+    [ -z "$VPN_INTERFACE" ] && return 1
+
+    # check if vpn interface exists and is up
+    if ! ip link show "$VPN_INTERFACE" 2>/dev/null | head -n 1 | grep -q 'UP'; then
+        return 1
+    fi
+
+    # check if dns query goes through vpn interface
+    if ! resolvectl query "$VPN_CHECK_DOMAIN" 2>/dev/null | grep -q "\-- link: $VPN_INTERFACE"; then
+        return 1
+    fi
+
+    return 0
+}
+
+# debug vpn status
+is_vpn_active_debug() {
+    local VPN_INTERFACE
+    VPN_INTERFACE=$(get_vpn_interface)
+
+    echo "== VPN Interface Status =="
+    ip link show "$VPN_INTERFACE" 2>/dev/null | head -n 1
+    echo
+    echo "== DNS Query via resolvectl =="
+    resolvectl query "$VPN_CHECK_DOMAIN" 2>/dev/null
+}
+
+# check if twingate is active by combining status command and dns interface check
+is_twingate_active() {
+    # fast check via twingate cli
+    if command -v twingate >/dev/null && twingate status 2>/dev/null | grep -q 'online'; then
+        return 0 # twingate online
+    fi
+
+    # fallback: check if dns resolution uses twingate interface
+    if command -v resolvectl >/dev/null && \
+       timeout 1s resolvectl query $LAN_CHECK_DOMAIN 2>/dev/null | grep -q 'link: sdwan0'; then
+        return 0 # twingate online
+    fi
+
+    return 1 # twingate offline
+}
+
+# get local ip address
+get_local_ip() {
+    ip -4 addr show "$INTERFACE" | grep -oP '(?<=inet\s)\d+(\.\d+){3}' | head -n1
+}
+
+# get external ip address with timeout and fallback
+get_external_ip() {
+    # try to get external ip quickly using dns lookup with dig
+    IP=$(timeout 2s dig +short myip.opendns.com @resolver1.opendns.com)
+
+    # if dig fails, fallback to curl primary service
+    if [[ -z "$IP" ]]; then
+        IP=$(timeout 3s curl --max-time 2 -s https://ipv4.icanhazip.com)
+    fi
+
+    # if still no ip, fallback to curl secondary service
+    if [[ -z "$IP" ]]; then
+        IP=$(timeout 3s curl --max-time 2 -s https://ifconfig.me)
+    fi
+
+    # output the ip or "No WAN" if none found
+    if [[ -z "$IP" ]]; then
+        echo "No WAN"
+    else
+        echo "$IP"
+    fi
+}
+
+# show wifi information using notify-send
+notify_info() {
+    SSID=$(iw dev "$INTERFACE" link | awk -F': ' '/SSID/ {print $2}')
+    SIGNAL=$(get_signal_strength)
+    LOCAL_IP=$(get_local_ip)
+    EXTERNAL_IP=$(get_external_ip)
+    VPN_ACTIVE=$(is_vpn_active && echo "VPN Active: yes" || echo "VPN Active: no")
+    TWINGATE=$(is_twingate_active && echo "online" || echo "offline")
+
+    icon=$(get_wifi_icon)
+    notify-send "Wi-Fi Status $icon" \
+        "SSID: $SSID\nSignal: $SIGNAL%\nLocal IP: $LOCAL_IP\nExternal IP: $EXTERNAL_IP\n$VPN_ACTIVE\nTwingate: $TWINGATE"
+}
+
+# print detailed wifi status to the terminal
+print_status() {
+    echo "          _  __ _"
+    echo "__      _(_)/ _(_)"
+    echo "\ \ /\ / / | |_| |"
+    echo " \ V  V /| |  _| |"
+    echo "  \_/\_/ |_|_| |_|"
+    echo ""
+    echo "Wi-Fi Interface : $INTERFACE"
+
+    if ! is_wifi_connected; then
+        echo "Status          : Disconnected"
+        return
+    fi
+
+    echo "Status          : Connected"
+
+    # SSID
+    SSID=$(iw dev "$INTERFACE" link | awk -F': ' '/SSID/ {print $2}')
+    echo "SSID            : $SSID"
+
+    # Signal Strength
+    SIGNAL=$(get_signal_strength)
+    echo "Signal Strength : $SIGNAL%"
+
+    # Local IP
+    LOCAL_IP=$(get_local_ip)
+    echo "Local IP        : $LOCAL_IP"
+
+    # External IP (kann lange dauern)
+    EXTERNAL_IP=$(get_external_ip)
+    echo "External IP     : $EXTERNAL_IP"
+
+    # Internet
+    if has_internet; then
+        echo "Internet        : yes"
+    else
+        echo "Internet        : no"
+    fi
+
+    # VPN
+    if is_vpn_active; then
+        echo "VPN Active      : yes"
+    else
+        echo "VPN Active      : no"
+    fi
+
+    # Twingate
+    if is_twingate_active; then
+        echo "Twingate        : online"
+    else
+        echo "Twingate        : offline"
+    fi
+}
+
+# main
+case "$1" in
+    notify)
+        notify_info
+        ;;
+    status)
+        print_status
+        ;;
+    vpn)
+        is_vpn_active_debug
+        ;;
+    help)
+        cat <<EOF
+Usage: $(basename "$0") [OPTION]
+
+Wi-Fi status script for use with dwmblocks. Displays signal strength icons or detailed info notification.
+
+Available options:
+
+  notify        Show Wi-Fi information via notify-send (SSID, signal, IP addresses)
+  status        Print full Wi-Fi status to the terminal
+  vpn           Print VPN interface status and DNS query 
+  help          Display this help text
+  (none)        Print icon representing the current Wi-Fi status (for use in status bar)
+
+Signal icon sets:
+  - 󰤯 󰤟 󰤢 󰤥 󰤨     Normal connection (Internet available)
+  - 󰤫 󰤠 󰤣 󰤦 󰤩     No Internet (!)
+  - 󰤬 󰤡 󰤤 󰤧 󰤪     VPN active (locked)
+
+Dependencies:
+  ip, iw, curl, dig, ping, notify-send, nerdfonts
+EOF
+        ;;
+    *)
+      icon="$(get_wifi_icon)$(is_twingate_active && echo "$ICON_TWINGATE")"
+        echo "$icon"
+        ;;
+esac
