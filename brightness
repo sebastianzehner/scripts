@@ -1,0 +1,148 @@
+#!/bin/bash
+
+# Backlight Control Script for uConsole (Arch Linux ARM)
+#
+# Controls the display brightness on the uConsole via /sys/class/backlight.
+# Supports setting, increasing, decreasing, dimming, and restoring brightness.
+# Displays visual notifications and works with brightness levels 0–9.
+
+BRIGHTNESS_PATH="/sys/class/backlight/backlight@0"
+BRIGHTNESS_FILE="$BRIGHTNESS_PATH/brightness"
+CURRENT_FILE="$BRIGHTNESS_PATH/actual_brightness"
+MAX_BRIGHTNESS=9
+MIN_BRIGHTNESS=1
+
+# Debug
+#echo "brightness called with argument: '$1'" >> /tmp/brightness.log
+
+# Ensure the script is run with proper permissions
+if [ ! -w "$BRIGHTNESS_FILE" ]; then
+    echo "Error: This script must be run with sudo or proper permissions."
+    exit 1
+fi
+
+# Read current brightness
+get_current() {
+    cat "$CURRENT_FILE"
+}
+
+# Set brightness (only 0–9)
+set_brightness() {
+    local value=$1
+    if [[ "$value" =~ ^[0-9]$ ]] && [ "$value" -le "$MAX_BRIGHTNESS" ]; then
+        echo "$value" > "$BRIGHTNESS_FILE"
+        show_brightness_notify
+    else
+        echo "Invalid value: $value (allowed: 0–$MAX_BRIGHTNESS)"
+        exit 1
+    fi
+}
+
+# Show usage
+print_help() {
+    echo "Usage: brightness [command]"
+    echo
+    echo "Commands:"
+    echo "  (no args)       Set brightness to 1"
+    echo "  up              Increase brightness by 1"
+    echo "  down            Decrease brightness by 1"
+    echo "  set <value>     Set brightness to value (0–9)"
+    echo "  get             Show current brightness"
+    echo "  dim             Gradually dim brightness to 1"
+    echo "  restore         Restore brightness after dim"
+    echo "  help            Show this help message"
+}
+
+# Dim gradually to brightness 1
+dim_gradually() {
+    current=$(get_current)
+    echo "$current" > /tmp/brightness_saved
+    while [ "$current" -gt "$MIN_BRIGHTNESS" ]; do
+        current=$((current - 1))
+        set_brightness "$current"
+        sleep 0.5
+    done
+}
+
+# Restore brightness after dim
+restore_brightness() {
+    SAVE_FILE="/tmp/brightness_saved"
+    DEFAULT_VALUE=5
+
+    if [ -f "$SAVE_FILE" ]; then
+        value=$(cat "$SAVE_FILE")
+        if echo "$value" | grep -qE '^[0-9]$'; then
+            echo "$value" > "$BRIGHTNESS_FILE"
+            show_brightness_notify
+        else
+            echo "$DEFAULT_VALUE" > "$BRIGHTNESS_FILE"
+            show_brightness_notify
+        fi
+        rm -f "$SAVE_FILE"
+    else
+        echo "$DEFAULT_VALUE" > "$BRIGHTNESS_FILE"
+        show_brightness_notify
+    fi
+}
+
+# Send notify message
+show_brightness_notify() {
+    local value
+    value=$(cat "$BRIGHTNESS_FILE")
+
+    # Clamp value to valid range
+    [ "$value" -lt 0 ] && value=0
+    [ "$value" -gt 9 ] && value=9
+
+    # Build a 9-block bar (■ = filled, □ = empty)
+    local filled_count="$value"
+    local empty_count=$((9 - value))
+
+    local filled_bar=""
+    local empty_bar=""
+
+    [ "$filled_count" -gt 0 ] && filled_bar=$(printf '■%.0s' $(seq 1 "$filled_count"))
+    [ "$empty_count" -gt 0 ] && empty_bar=$(printf '□%.0s' $(seq 1 "$empty_count"))
+
+    local bar="${filled_bar}${empty_bar}"
+
+    notify-send -r 200 "Brightness: $value" "$bar"
+}
+
+# Main
+case "$1" in
+    up)
+        current=$(get_current)
+        new=$((current + 1))
+        [ "$new" -le "$MAX_BRIGHTNESS" ] && set_brightness "$new" || echo "Already at maximum"
+        ;;
+    down)
+        current=$(get_current)
+        new=$((current - 1))
+        [ "$new" -ge 0 ] && set_brightness "$new" || echo "Already at minimum"
+        ;;
+    set)
+        [ -z "$2" ] && echo "Missing value for 'set'" && exit 1
+        set_brightness "$2"
+        ;;
+    get)
+        get_current
+        ;;
+    dim)
+        dim_gradually
+        ;;
+    restore)
+        restore_brightness
+        ;;
+    help)
+        print_help
+        ;;
+    "")
+        set_brightness 1
+        ;;
+    *)
+        echo "Unknown command: $1"
+        print_help
+        exit 1
+        ;;
+esac
