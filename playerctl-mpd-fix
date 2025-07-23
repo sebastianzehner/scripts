@@ -1,0 +1,31 @@
+#!/bin/sh
+
+# Fix for broken playback state in mpd after next/previous
+# Usage: playerctl-mpd-fix next|previous
+
+set -e
+
+ACTION="$1"
+
+# Only allow "next" or "previous" as argument
+case "$ACTION" in
+    next)
+        playerctl next
+        ;;
+    previous)
+        playerctl previous
+        ;;
+    *)
+        echo "Usage: $0 [next|previous]" >&2
+        exit 1
+        ;;
+esac
+
+# Short delay to let the command settle
+sleep 0.1
+
+# Fix playback
+playerctl stop
+sleep 0.1
+playerctl play
+sigdwmblocks 7
