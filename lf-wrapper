@@ -14,6 +14,8 @@ if [ -n "${DISPLAY-}" ] && [ -z "${FIFO_UEBERZUG-}" ]; then
   cleanup() {
     exec 3>&-
     rm -- "$FIFO_UEBERZUG"
+    # Delete ueberzugpp cache on exit
+    rm -rf "$HOME/.cache/ueberzugpp"
   }
 
   mkfifo -- "$FIFO_UEBERZUG"
