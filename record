@@ -4,11 +4,25 @@
 
 # --- Configuration ---
 AUDIO_SRC="default"  # Use 'pactl list sources' to find correct input
-FRAMERATE=30
-CODEC_VID="libx264"
 CODEC_AUD="aac"
-PRESET="ultrafast"
 OVERSCAN=10 # used only in record_window
+
+# Auto-detect best codec and framerate
+_ENCODERS=$(ffmpeg -encoders 2>/dev/null)
+if echo "$_ENCODERS" | grep -q h264_nvenc; then
+    # NVIDIA GPU available
+    CODEC_VID="h264_nvenc -rc vbr -cq 18 -b:v 0"
+    FRAMERATE=60
+elif echo "$_ENCODERS" | grep -q h264_amf; then
+    # AMD GPU available
+    CODEC_VID="h264_amf -quality balanced -rc cqp -qp_i 18 -qp_p 18"
+    FRAMERATE=60
+else
+    # CPU fallback (Raspberry Pi, etc.)
+    CODEC_VID="libx264 -preset ultrafast -crf 23"
+    FRAMERATE=30
+fi
+unset _ENCODERS
 
 init_paths() {
     # Load XDG user dirs for standard folders
@@ -124,8 +138,8 @@ start_recording() {
 start_ffmpeg() {
     local geometry="$1"
     ffmpeg -video_size "${geometry}" -framerate "$FRAMERATE" -f x11grab -i "$2" \
-           -f pulse -i "$AUDIO_SRC" -c:v "$CODEC_VID" -preset "$PRESET" -c:a "$CODEC_AUD" "$FILENAME" &
-    notify-send "$3" "$(basename "$FILENAME")" || true
+           -f pulse -i "$AUDIO_SRC" -c:v $CODEC_VID -c:a "$CODEC_AUD" "$FILENAME" &
+    notify-send -t 2000 "$3" "$(basename "$FILENAME")" || true
     echo "$3 → $FILENAME"
     start_recording
 }
