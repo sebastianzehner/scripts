@@ -1,0 +1,47 @@
+#!/bin/bash
+# This script displays a list of SSH hosts from ~/.ssh/config in dmenu
+# and connects to the selected host.
+#
+# Example ~/.ssh/config format:
+#
+# Host myserver.lan
+#     HostName myserver.lan
+#     User username
+#     Port 22
+#
+# Host nas
+#     HostName nas.lan
+#     User admin
+#     Port 8022
+#
+# Host remote
+#     HostName example.com
+#     User root
+#     Port 2222
+#     IdentityFile ~/.ssh/id_rsa_special
+
+# Path to SSH config
+ssh_config="$HOME/.ssh/config"
+
+# Check if SSH config exists
+if [ ! -f "$ssh_config" ]; then
+    echo "SSH config file not found: $ssh_config"
+    exit 1
+fi
+
+# Extract all Host entries from SSH config (excluding wildcards)
+hosts=$(grep "^Host " "$ssh_config" | awk '{print $2}' | grep -v '\*' | sort -u)
+
+# Check if any hosts were found
+if [ -z "$hosts" ]; then
+    echo "No hosts found in SSH config"
+    exit 1
+fi
+
+# Show selection menu with dmenu
+choice=$(echo "$hosts" | dmenu -noi -c -bw 2 -l 15 -p "SSH to:" -i -nb "#11111b" -nf "#a6adc8" -sb "#1e1e2e" -sf "#cdd6f4")
+
+# If a selection was made, start the SSH connection
+if [ -n "$choice" ]; then
+    exec ssh "$choice"
+fi
