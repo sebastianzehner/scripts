@@ -97,6 +97,9 @@ record_screen() {
 # Start area recording (selection via slop)
 record_area() {
     read -r X Y W H <<< "$(slop -f "%x %y %w %h")" || { notify-send "Selection cancelled" || true; exit 1; }
+    # Round down to even numbers (required by yuv420p)
+    W=$((W - W % 2))
+    H=$((H - H % 2))
     local geo="${W}x${H}"
     local input="$DISPLAY+$X,$Y"
     start_ffmpeg "$geo" "$input" "Recording started ($geo)"
