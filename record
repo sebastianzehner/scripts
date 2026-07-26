@@ -138,7 +138,10 @@ start_recording() {
 start_ffmpeg() {
     local geometry="$1"
     ffmpeg -video_size "${geometry}" -framerate "$FRAMERATE" -f x11grab -i "$2" \
-           -f pulse -i "$AUDIO_SRC" -c:v $CODEC_VID -c:a "$CODEC_AUD" "$FILENAME" &
+           -f pulse -i "$AUDIO_SRC" \
+           -vf "format=yuv420p" \
+           -colorspace bt709 -color_primaries bt709 -color_trc bt709 -color_range pc \
+           -c:v $CODEC_VID -c:a "$CODEC_AUD" "$FILENAME" &
     notify-send -t 2000 "$3" "$(basename "$FILENAME")" || true
     echo "$3 → $FILENAME"
     start_recording
