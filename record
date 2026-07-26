@@ -149,7 +149,7 @@ start_ffmpeg() {
            -f pulse -i "$AUDIO_SRC" \
            -vf "format=yuv420p" \
            -colorspace bt709 -color_primaries bt709 -color_trc bt709 -color_range pc \
-           -c:v $CODEC_VID -c:a "$CODEC_AUD" "$FILENAME" &
+           -c:v $CODEC_VID -c:a "$CODEC_AUD" -b:a 256k "$FILENAME" &
     notify-send -t 2000 "$3" "$(basename "$FILENAME")" || true
     echo "$3 → $FILENAME"
     start_recording
