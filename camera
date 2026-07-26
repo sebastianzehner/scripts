@@ -1,0 +1,124 @@
+#!/usr/bin/env bash
+#
+# camera - control the Sony A6300 camera streaming setup
+#
+# The A6300's HDMI output goes through an LGX2 capture device. The
+# LGX2 has no Linux driver, so a Windows VM (Tiny11) runs the device
+# driver plus ffmpeg to serve the capture as an RTMP stream. This
+# script relays that stream into a v4l2loopback virtual webcam device
+# (for Zoom/OBS etc.), and provides helpers for viewing, recording,
+# and controlling the VM.
+#
+set -euo pipefail
+
+RTMP_URL="rtmp://127.0.0.1:1935/live"
+LOOPBACK_LABEL="Sony A6300"
+VIDEO_NR=98
+RECORD_DIR="$HOME/videos/a6300"
+COMPOSE_FILE="$HOME/docker-compose/windows/tiny11/docker-compose.yml"
+
+usage() {
+    echo "Usage: $0 {start|rdp|live|webcam|record|stop|status}"
+    echo "  start   - start the Tiny11 VM container"
+    echo "  rdp     - open an RDP session into the VM (to launch the camera stream there)"
+    echo "  live    - show the live camera image with mpv"
+    echo "  webcam  - set up the virtual webcam device from the RTMP stream (for Zoom etc.)"
+    echo "  record  - start recording the RTMP stream (Ctrl+C to stop)"
+    echo "  stop    - tear down the webcam relay/loopback device (VM keeps running)"
+    echo "  status  - show current state"
+    exit 1
+}
+
+wait_for_rtmp() {
+    echo "Waiting for RTMP stream from the VM (up to 60s)..."
+    for _ in $(seq 1 60); do
+        if ffprobe -v quiet "$RTMP_URL" -show_entries stream=codec_type \
+            -of csv=p=0 2>/dev/null | grep -q video; then
+            echo "Stream available."
+            return 0
+        fi
+        sleep 1
+    done
+    echo "Error: no stream found. Did you start the camera stream inside the VM (rdp + start-camera-stream.bat)?" >&2
+    return 1
+}
+
+cmd_start() {
+    echo "Starting Windows VM container..."
+    docker compose -f "$COMPOSE_FILE" up -d
+    echo "Done. Use '$0 rdp' to connect and start the camera stream inside the VM."
+}
+
+cmd_rdp() {
+    xfreerdp3 /v:127.0.0.1:3389 /u:$(whoami) /cert:ignore /dynamic-resolution /audio-mode:0
+}
+
+start_loopback() {
+    if lsmod | grep -q v4l2loopback; then
+        echo "v4l2loopback already loaded, reloading for a clean label..."
+        sudo modprobe -r v4l2loopback
+    fi
+    sudo modprobe v4l2loopback video_nr="$VIDEO_NR" card_label="$LOOPBACK_LABEL" exclusive_caps=1
+}
+
+start_relay() {
+    if pgrep -f "video${VIDEO_NR}" >/dev/null; then
+        echo "Relay already running."
+        return
+    fi
+    nohup ffmpeg -fflags nobuffer -flags low_delay -i "$RTMP_URL" \
+        -pix_fmt yuv420p -f v4l2 "/dev/video${VIDEO_NR}" \
+        > /tmp/a6300-relay.log 2>&1 &
+    disown
+    echo "Relay started (PID $!, log: /tmp/a6300-relay.log)."
+}
+
+cmd_webcam() {
+    wait_for_rtmp
+    start_loopback
+    start_relay
+    echo "Done. Camera selectable in Zoom/OBS as '$LOOPBACK_LABEL'."
+}
+
+cmd_live() {
+    wait_for_rtmp
+    mpv --profile=low-latency --demuxer-max-bytes=8MiB --audio-buffer=0.2 "$RTMP_URL"
+}
+
+cmd_record() {
+    mkdir -p "$RECORD_DIR"
+    wait_for_rtmp
+    local outfile="$RECORD_DIR/recording_$(date +%Y%m%d_%H%M%S).mkv"
+    echo "Recording -> $outfile (Ctrl+C to stop)"
+    ffmpeg -i "$RTMP_URL" -c copy -f matroska "$outfile"
+}
+
+cmd_stop() {
+    pkill -f "video${VIDEO_NR}" 2>/dev/null || true
+    sleep 1
+    sudo modprobe -r v4l2loopback 2>/dev/null || true
+    echo "Relay stopped, loopback unloaded. (VM keeps running -- to stop it: docker compose -f $COMPOSE_FILE down)"
+}
+
+cmd_status() {
+    echo ""
+    echo "--- v4l2loopback ---"
+    lsmod | grep v4l2loopback || echo "not loaded"
+    echo ""
+    echo "--- relay process ---"
+    pgrep -af "video${VIDEO_NR}" || echo "no relay active"
+    echo ""
+    echo "--- VM container ---"
+    docker ps --filter "name=tiny11" --format "table {{.Names}}\t{{.Status}}"
+}
+
+case "${1:-}" in
+    start)  cmd_start ;;
+    rdp)    cmd_rdp ;;
+    live)   cmd_live ;;
+    webcam) cmd_webcam ;;
+    record) cmd_record ;;
+    stop)   cmd_stop ;;
+    status) cmd_status ;;
+    *)      usage ;;
+esac
