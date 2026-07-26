@@ -1,0 +1,21 @@
+#!/bin/bash
+
+# Stop picom if running
+if pgrep -x picom >/dev/null; then
+    pkill -x picom
+    sleep 0.5
+fi
+
+# Ensure picom restarts even if something crashes
+trap 'picom &' EXIT
+
+# Launch Gamescope + MangoHud + the game
+
+# Example for 1080p:
+# gamescope -W 1920 -H 1080 -r 60 -f -- mangohud "$@"
+
+# Example for 1440p:
+# gamescope -W 2560 -H 1440 -r 60 -f -- mangohud "$@"
+
+# Example for 4K:
+exec gamescope -W 3840 -H 2160 -r 60 -f -- mangohud "$@"
