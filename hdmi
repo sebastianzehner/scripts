@@ -1,0 +1,141 @@
+#!/bin/bash
+
+# HDMI Mode Switcher for ClockworkPi uConsole using dmenu and xrandr
+# Allows quick switching between external HDMI and internal display
+
+# Display names (adjust according to xrandr output)
+INTERNAL="DSI-2"
+EXTERNAL="HDMI-1-1"
+
+restore_background() {
+  [[ -f "$HOME/.fehbg" ]] && "$HOME/.fehbg" # restore background
+  echo "  Background image restored."
+}
+
+# Function to activate only the internal display
+use_internal_display_only() {
+  xrandr --output "$EXTERNAL" --off
+  xrandr --output "$INTERNAL" --mode 720x1280 --rate 60 --rotate right --primary
+  restore_background
+  echo "  Switched to internal display."
+}
+
+# Function to activate only external hdmi
+use_hdmi_only() {
+  xrandr --output "$INTERNAL" --off
+  xrandr --output "$EXTERNAL" --mode 1920x1080 --rate 60
+  restore_background
+
+  # Confirmation prompt with timeout
+  if command -v dmenu &> /dev/null; then
+    CONFIRM=$( (printf "Yes\nNo") | timeout 10 dmenu -noi -c -bw 2 -l 5 -p "Keep HDMI-only mode?" -i -nb "#11111b" -nf "#a6adc8" -sb "#1e1e2e" -sf "#cdd6f4")
+    [[ -z "$CONFIRM" ]] && CONFIRM="Timeout"
+  else
+    echo -n "Keep HDMI-only mode? (y/N, timeout in 10s): "
+    read -t 10 CONFIRM
+    [[ -z "$CONFIRM" ]] && CONFIRM="Timeout"
+  fi
+
+  case "$CONFIRM" in
+    [Yy]* | "Yes" )
+      echo "  Switched to HDMI-only mode."
+      ;;
+    * )
+      echo "  Reverting to internal display."
+      use_internal_display_only
+      notify-send "Display Mode" "Reverted to internal display."
+      ;;
+  esac
+}
+
+# Handle command-line arguments
+if [[ "$1" == "--help" || "$1" == "-h" ]]; then
+  cat <<EOF
+hdmi – Display mode switcher for ClockworkPi uConsole
+
+Usage: hdmi [OPTION]
+
+Without options, opens an interactive menu (via dmenu or select)
+to choose the display mode.
+
+Available display modes:
+  1. Mirror 720p (DSI -> HDMI)
+  2. HDMI only 1080p (auto-reverts after timeout)
+  3. Extend HDMI (right of DSI)
+  4. Extend DSI (left of HDMI)
+  5. Internal display only
+
+Options:
+  -h, --help         Show this help message and exit
+  --internal         Switch to internal display only
+  --hdmi-only        Activate HDMI-only mode with timeout confirmation
+
+Examples:
+  hdmi               # Open menu
+  hdmi --internal    # Switch to DSI-2 only
+  hdmi --hdmi-only   # Use HDMI only and confirm after 10s
+EOF
+  exit 0
+elif [[ "$1" == "--internal" ]]; then
+  use_internal_display_only
+  exit 0
+elif [[ "$1" == "--hdmi-only" ]]; then
+  use_hdmi_only
+  exit 0
+fi
+
+# Display mode options
+OPTIONS=(
+  "1. Mirror 720p (DSI -> HDMI)"
+  "2. HDMI only 1080p"
+  "3. Extend HDMI (right of DSI)"
+  "4. Extend DSI (left of HDMI)"
+  "5. Internal display only"
+  "6. Exit"
+)
+
+# Display selection menu (dmenu if available, otherwise use select)
+if command -v dmenu &> /dev/null; then
+  CHOICE=$(printf "%s\n" "${OPTIONS[@]}" | dmenu -noi -c -bw 2 -l 6 -p "Choose display mode:" -i -nb "#11111b" -nf "#a6adc8" -sb "#1e1e2e" -sf "#cdd6f4")
+else
+  echo "Choose display mode:"
+  select CHOICE in "${OPTIONS[@]}"; do
+    break
+  done
+fi
+
+# Apply selected mode
+case "$CHOICE" in
+  "1."* )
+    # Mirror DSI output to HDMI in 720p
+    xrandr --output "$INTERNAL" --mode 720x1280 --rate 60 --rotate right
+    xrandr --output "$EXTERNAL" --mode 1280x720 --rate 60 --same-as "$INTERNAL"
+    restore_background
+    echo "  Mirrored internal display to HDMI output."
+    ;;
+  "2."* )
+    # Use only HDMI in 1080p
+    use_hdmi_only
+    ;;
+  "3."* )
+    # Extend desktop to HDMI (right of DSI)
+    xrandr --output "$INTERNAL" --mode 720x1280 --rate 60 --rotate right --primary
+    xrandr --output "$EXTERNAL" --mode 1920x1080 --rate 60 --right-of "$INTERNAL"
+    restore_background
+    echo "  Extended desktop to HDMI output."
+    ;;
+  "4."* )
+    # Extend desktop to DSI (left of HDMI)
+    xrandr --output "$EXTERNAL" --mode 1920x1080 --rate 60 --primary
+    xrandr --output "$INTERNAL" --mode 720x1280 --rate 60 --rotate right --left-of "$EXTERNAL"
+    restore_background
+    echo "  Extended desktop to internal display."
+    ;;
+  "5."* )
+    # Use only internal display
+    use_internal_display_only
+    ;;
+  * )
+    echo "No change."
+    ;;
+esac
