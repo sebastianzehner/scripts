@@ -115,9 +115,14 @@ record_window() {
         /Width:/ { w=$2 }
         /Height:/ { h=$2 }
         END { printf("WIDTH=%s HEIGHT=%s X=%s Y=%s\n", w, h, x, y) }')"
-    #local geo="${WIDTH}x${HEIGHT}"
-    #local input="$DISPLAY+$X,$Y"
-    local geo="$((WIDTH - OVERSCAN))x$((HEIGHT - OVERSCAN))"
+
+    local w=$((WIDTH - OVERSCAN))
+    local h=$((HEIGHT - OVERSCAN))
+    # Round down to even numbers (required by yuv420p)
+    w=$((w - w % 2))
+    h=$((h - h % 2))
+
+    local geo="${w}x${h}"
     local input="$DISPLAY+$((X + OVERSCAN / 2)),$((Y + OVERSCAN / 2))"
     start_ffmpeg "$geo" "$input" "Recording started ($geo)"
 }
