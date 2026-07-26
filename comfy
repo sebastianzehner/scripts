@@ -1,0 +1,161 @@
+#!/bin/bash
+#
+# comfy script - start/stop ComfyUI + Brave kiosk instance
+#
+# Usage:
+#   comfy          Start ComfyUI (if not already running) and open Brave
+#   comfy stop     Stop Brave (kiosk instance) and the ComfyUI tmux session
+#   comfy update   Update ComfyUI (ComfyUI must be stopped first)
+#   comfy version  Show script, ComfyUI, and Manager version
+#   comfy help     Show this help message
+#
+
+COMFY_DIR="/mnt/sumpf/ai/ComfyUI"
+COMFY_URL="http://127.0.0.1:8188/"
+TMUX_SESSION="comfyui"
+BRAVE_PROFILE="$HOME/.config/brave-comfy"
+APP_NAME="ComfyUI"
+ICON="$HOME/scripts/icons/selfhst--comfyui-light.svg"
+SCRIPT_VERSION="1.3.0"
+
+show_version() {
+    echo "comfy script v$SCRIPT_VERSION"
+    echo ""
+
+    if [ ! -d "$COMFY_DIR" ]; then
+        echo "ComfyUI directory not found: $COMFY_DIR"
+        exit 1
+    fi
+
+    cd "$COMFY_DIR"
+
+    COMFY_VERSION=$(grep '^version' pyproject.toml | cut -d'"' -f2)
+    COMFY_COMMIT=$(git log -1 --format="%h (%cd)" --date=local)
+
+    source "/opt/miniconda3/etc/profile.d/conda.sh"
+    conda activate comfy2
+    MANAGER_VERSION=$(pip show comfyui-manager 2>/dev/null | grep '^Version' | cut -d' ' -f2)
+
+    echo "ComfyUI:  v$COMFY_VERSION  $COMFY_COMMIT"
+    echo "Manager:  v${MANAGER_VERSION:-not found}"
+}
+
+notify() {
+    # $1 = title, $2 = message, $3 = urgency (low|normal|critical), optional
+    notify-send -a "$APP_NAME" -u "${3:-low}" -i "$ICON" -h string:x-dunst-stack-tag:comfy "$1" "$2" 2>/dev/null
+}
+
+show_help() {
+    cat << EOF
+comfy script v$SCRIPT_VERSION - start/stop/update ComfyUI + Brave kiosk instance
+
+Usage:
+  comfy          Start ComfyUI (if not already running) and open Brave
+                 pointed at the local web interface
+  comfy stop     Stop the Brave kiosk instance and the ComfyUI tmux session
+  comfy update   Update ComfyUI (ComfyUI must be stopped first)
+  comfy version  Show script, ComfyUI, and Manager version
+  comfy help     Show this help message
+
+Details:
+  - ComfyUI is started inside a detached tmux session named "$TMUX_SESSION"
+    (attach with: tmux attach -t $TMUX_SESSION)
+  - Brave runs with a separate profile ("$BRAVE_PROFILE"),
+    completely independent from your regular Brave instance
+  - Desktop notifications are sent via notify-send for start/stop/update events
+EOF
+}
+
+start_comfy() {
+    if curl -s --head --max-time 1 "$COMFY_URL" > /dev/null 2>&1; then
+        echo "ComfyUI is already running."
+    else
+        echo "ComfyUI is not running, starting it..."
+        notify "ComfyUI" "Starting ComfyUI, please wait..."
+
+        tmux kill-session -t "$TMUX_SESSION" 2>/dev/null
+
+        tmux new-session -d -s "$TMUX_SESSION" "cd '$COMFY_DIR' && ./start_new.sh"
+
+        echo -n "Waiting for ComfyUI"
+        for i in $(seq 1 60); do
+            if curl -s --head --max-time 1 "$COMFY_URL" > /dev/null 2>&1; then
+                echo " -> ready!"
+                break
+            fi
+            echo -n "."
+            sleep 1
+        done
+
+        if ! curl -s --head --max-time 1 "$COMFY_URL" > /dev/null 2>&1; then
+            echo "ComfyUI did not become reachable within 60 seconds. Aborting."
+            notify "ComfyUI" "Failed to start within 60 seconds. Check: tmux attach -t $TMUX_SESSION" critical
+            exit 1
+        fi
+
+        notify "ComfyUI" "ComfyUI is ready, opening Brave..."
+    fi
+}
+
+start_brave() {
+    brave --app="$COMFY_URL" \
+      --user-data-dir="$BRAVE_PROFILE" \
+      --password-store=basic \
+      --disable-save-password-bubble
+}
+
+stop_all() {
+    echo "Stopping Brave..."
+    pkill -f "brave-comfy" 2>/dev/null
+
+    echo "Stopping ComfyUI tmux session..."
+    tmux kill-session -t "$TMUX_SESSION" 2>/dev/null
+
+    echo "Done."
+    notify "ComfyUI" "Brave and ComfyUI stopped."
+}
+
+update_comfy() {
+    if curl -s --head --max-time 1 "$COMFY_URL" > /dev/null 2>&1; then
+        echo "ComfyUI is currently running. Please stop it first with: comfy stop"
+        notify "ComfyUI Update" "Still running. Stop first: comfy stop" critical
+        exit 1
+    fi
+
+    echo "Starting ComfyUI update..."
+    notify "ComfyUI Update" "Update started, please wait..."
+
+    cd "$COMFY_DIR" && ./update_new.sh
+    EXIT_CODE=$?
+
+    if [ "$EXIT_CODE" = "0" ]; then
+        notify "ComfyUI Update" "Update completed successfully."
+    else
+        notify "ComfyUI Update" "Update failed. Check terminal output." critical
+        exit 1
+    fi
+}
+
+case "$1" in
+    stop)
+        stop_all
+        ;;
+    update)
+        update_comfy
+        ;;
+    version)
+        show_version
+        ;;
+    help|--help|-h)
+        show_help
+        ;;
+    "")
+        start_comfy
+        start_brave
+        ;;
+    *)
+        echo "Unknown option: $1"
+        echo "Run 'comfy --help' for usage."
+        exit 1
+        ;;
+esac
