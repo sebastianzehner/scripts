@@ -16,6 +16,7 @@ import argparse
 import fnmatch
 import os
 import posixpath
+import shutil
 import subprocess
 import time
 from pathlib import Path
@@ -64,6 +65,104 @@ def get_ssh_user(host):
     except Exception:
         pass
     return None
+
+
+def get_ssh_hosts(config_path="~/.ssh/config"):
+    """
+    Extract all Host entries from the SSH config (excluding wildcards).
+    Returns a sorted list of host aliases, or an empty list if the
+    config file doesn't exist or contains no hosts.
+    """
+    path = Path(config_path).expanduser()
+    if not path.is_file():
+        return []
+
+    hosts = set()
+    for line in path.read_text().splitlines():
+        stripped = line.strip()
+        if stripped.lower().startswith("host "):
+            for entry in stripped.split()[1:]:
+                if "*" not in entry and "?" not in entry:
+                    hosts.add(entry)
+    return sorted(hosts)
+
+
+def select_ssh_host():
+    """
+    Let the user pick a host from ~/.ssh/config. Uses fzf if
+    available, otherwise a numbered prompt. Returns None if no
+    hosts are found or nothing was selected.
+    """
+    hosts = get_ssh_hosts()
+    if not hosts:
+        return None
+
+    if shutil.which("fzf"):
+        try:
+            result = subprocess.run(
+                ["fzf", "--prompt=NAS host: "],
+                input="\n".join(hosts),
+                capture_output=True,
+                text=True,
+            )
+            choice = result.stdout.strip()
+            return choice or None
+        except Exception as e:
+            print(f"⚠️  fzf failed ({e}), falling back to numbered prompt.\n")
+
+    print("Hosts from ~/.ssh/config:\n")
+    for i, h in enumerate(hosts, 1):
+        print(f"  {i}. {h}")
+    print()
+    raw = input("Select a host by number: ").strip()
+    if raw.isdigit():
+        idx = int(raw) - 1
+        if 0 <= idx < len(hosts):
+            return hosts[idx]
+    return None
+
+
+def interactive_select(files):
+    """
+    Let the user interactively pick which files to queue. Uses fzf
+    (multi-select) if available, otherwise falls back to a simple
+    numbered prompt. Returns the selected subset of files, or the
+    full list if the user makes no restriction (empty fallback input).
+    """
+    if shutil.which("fzf"):
+        try:
+            result = subprocess.run(
+                [
+                    "fzf",
+                    "--multi",
+                    "--prompt=Select files (Tab to mark, Enter to confirm): ",
+                ],
+                input="\n".join(files),
+                capture_output=True,
+                text=True,
+            )
+            selected = [line for line in result.stdout.splitlines() if line]
+            return selected
+        except Exception as e:
+            print(f"⚠️  fzf failed ({e}), falling back to numbered prompt.\n")
+
+    # Fallback: simple numbered prompt
+    print("Files in repository:\n")
+    for i, f in enumerate(files, 1):
+        print(f"  {i}. {f}")
+    print()
+    raw = input("Enter numbers to queue (e.g. 1 3 5), or press Enter for all: ").strip()
+
+    if not raw:
+        return files
+
+    selected = []
+    for part in raw.split():
+        if part.isdigit():
+            idx = int(part) - 1
+            if 0 <= idx < len(files):
+                selected.append(files[idx])
+    return selected
 
 
 def filter_files(files, patterns):
@@ -122,7 +221,12 @@ def main():
     parser = argparse.ArgumentParser(
         description="Download HF repo on NAS via aria2 RPC"
     )
-    parser.add_argument("repo", help="Hugging Face repo ID, e.g. Comfy-Org/SCAIL-2")
+    parser.add_argument(
+        "repo",
+        nargs="?",
+        default=None,
+        help="Hugging Face repo ID, e.g. Comfy-Org/SCAIL-2 (prompted if omitted)",
+    )
     parser.add_argument(
         "--revision", default="main", help="Revision / branch / tag (default: main)"
     )
@@ -140,7 +244,7 @@ def main():
 
     # NAS / aria2
     parser.add_argument(
-        "--nas-host", required=True, help="NAS hostname or IP (required)"
+        "--nas-host", default=None, help="NAS hostname or IP (prompted if omitted)"
     )
     parser.add_argument(
         "--nas-user",
@@ -171,10 +275,35 @@ def main():
         help=(
             "Only queue files matching one or more glob patterns "
             '(e.g. --include "*.safetensors" config.json). '
-            "Default: include all files."
+            "Skips interactive selection."
         ),
     )
+    parser.add_argument(
+        "--all",
+        action="store_true",
+        help="Queue all files without prompting (skips interactive selection)",
+    )
+    parser.add_argument(
+        "--interactive",
+        "-i",
+        action="store_true",
+        help="Interactively pick which files to queue (uses fzf if available, else a numbered prompt). This is the default when neither --include nor --all is given.",
+    )
     args = parser.parse_args()
+
+    if not args.repo:
+        args.repo = input("Hugging Face repo ID (e.g. Comfy-Org/SCAIL-2): ").strip()
+        if not args.repo:
+            print("❌ No repo given. Exiting.")
+            return
+
+    if not args.nas_host:
+        args.nas_host = select_ssh_host()
+        if not args.nas_host:
+            args.nas_host = input("NAS hostname or IP: ").strip()
+        if not args.nas_host:
+            print("❌ No NAS host given. Exiting.")
+            return
 
     rpc_secret = read_rpc_secret(Path(args.rpc_secret_file).expanduser())
     if not rpc_secret:
@@ -222,10 +351,15 @@ def main():
     except Exception as e:
         print(f"❌ Failed to access repository {args.repo}: {e}")
         return
-    files = filter_files(all_files, args.include)
+    if args.include:
+        files = filter_files(all_files, args.include)
+    elif args.all:
+        files = all_files
+    else:
+        files = interactive_select(all_files)
 
     if not files:
-        print("❌ No files match the given --include pattern(s). Nothing to queue.")
+        print("❌ No files selected. Nothing to queue.")
         return
 
     if args.include:
@@ -233,6 +367,8 @@ def main():
         print(
             f"🔎 Filtered by pattern {args.include}: {len(files)} matched, {skipped} skipped\n"
         )
+    elif not args.all:
+        print(f"\n✅ Selected {len(files)} of {len(all_files)} file(s)\n")
 
     print(f"📦 Queue downloads via aria2 RPC → {target_dir}\n")
 
