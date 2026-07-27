@@ -12,8 +12,9 @@ Authentication is done via --rpc-secret.
 """
 
 import argparse
-import requests
 from pathlib import Path
+
+import requests
 
 
 def rpc_call(host, method, params):
@@ -34,6 +35,43 @@ def rpc_call(host, method, params):
     )
     r.raise_for_status()
     return r.json()["result"]
+
+
+def calc_eta(d):
+    """
+    Calculate estimated time remaining in seconds, based on
+    remaining bytes and current download speed. Returns None if
+    speed is 0 or data is missing.
+    """
+    try:
+        total = int(d.get("totalLength", 0))
+        done = int(d.get("completedLength", 0))
+        speed = int(d.get("downloadSpeed", 0))
+        if speed <= 0 or total <= 0:
+            return None
+        remaining = total - done
+        return remaining // speed
+    except (ValueError, TypeError):
+        return None
+
+
+def format_eta(seconds):
+    """
+    Format a duration in seconds as a human-readable string,
+    e.g. 536 -> "8m 56s", 45 -> "45s", 7325 -> "2h 2m 5s".
+    """
+    seconds = int(seconds)
+    hours, remainder = divmod(seconds, 3600)
+    minutes, secs = divmod(remainder, 60)
+
+    parts = []
+    if hours:
+        parts.append(f"{hours}h")
+    if minutes:
+        parts.append(f"{minutes}m")
+    if secs or not parts:
+        parts.append(f"{secs}s")
+    return " ".join(parts)
 
 
 def human(value):
@@ -101,8 +139,9 @@ def main():
             done = human(d["completedLength"])
             total = human(d["totalLength"])
             speed = human(d["downloadSpeed"]) + "/s"
-            eta = d.get("eta", 0)
-            print(f"- {name}: {done} / {total} @ {speed} (ETA: {eta}s)")
+            eta = calc_eta(d)
+            eta_str = format_eta(eta) if eta is not None else "unknown"
+            print(f"- {name}: {done} / {total} @ {speed} (ETA: {eta_str})")
 
     if waiting:
         print("\n⏳ Waiting downloads:")
