@@ -98,6 +98,11 @@ start_comfy() {
 }
 
 start_brave() {
+    if pgrep -f "brave-comfy" > /dev/null 2>&1; then
+        echo "Brave (ComfyUI) is already running, not opening another instance."
+        return
+    fi
+
     brave --app="$COMFY_URL" \
       --user-data-dir="$BRAVE_PROFILE" \
       --password-store=basic \
