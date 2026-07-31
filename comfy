@@ -15,10 +15,11 @@ COMFY_DIR="/mnt/sumpf/ai/ComfyUI"
 COMFY_URL="http://127.0.0.1:8188/"
 TMUX_SESSION="comfyui"
 CONDA_ENV="comfy2"
+LISTEN_HOST="0.0.0.0"
 BRAVE_PROFILE="$HOME/.config/brave-comfy"
 APP_NAME="ComfyUI"
 ICON="$HOME/scripts/icons/selfhst--comfyui-light.svg"
-SCRIPT_VERSION="1.5.0"
+SCRIPT_VERSION="1.6.0"
 
 show_version() {
     echo "comfy script v$SCRIPT_VERSION"
@@ -98,7 +99,14 @@ start_comfy() {
 
         tmux kill-session -t "$TMUX_SESSION" 2>/dev/null
 
-        tmux new-session -d -s "$TMUX_SESSION" "cd '$COMFY_DIR' && ./start_new.sh"
+        tmux new-session -d -s "$TMUX_SESSION" "
+            tmux rename-window 'comfy'
+            source '/opt/miniconda3/etc/profile.d/conda.sh'
+            conda activate '$CONDA_ENV'
+            cd '$COMFY_DIR'
+            export COMFYUI_MODEL_PATH='$COMFY_DIR/models'
+            python main.py --listen $LISTEN_HOST --enable-manager
+        "
 
         echo -n "Waiting for ComfyUI"
         for i in $(seq 1 60); do
