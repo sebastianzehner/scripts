@@ -14,10 +14,11 @@
 COMFY_DIR="/mnt/sumpf/ai/ComfyUI"
 COMFY_URL="http://127.0.0.1:8188/"
 TMUX_SESSION="comfyui"
+CONDA_ENV="comfy2"
 BRAVE_PROFILE="$HOME/.config/brave-comfy"
 APP_NAME="ComfyUI"
 ICON="$HOME/scripts/icons/selfhst--comfyui-light.svg"
-SCRIPT_VERSION="1.4.0"
+SCRIPT_VERSION="1.5.0"
 
 show_version() {
     echo "comfy script v$SCRIPT_VERSION"
@@ -152,15 +153,54 @@ update_comfy() {
     echo "Starting ComfyUI update..."
     notify "ComfyUI Update" "Update started, please wait..."
 
-    cd "$COMFY_DIR" && ./update_new.sh
-    EXIT_CODE=$?
+    source "/opt/miniconda3/etc/profile.d/conda.sh"
+    conda activate "$CONDA_ENV"
 
-    if [ "$EXIT_CODE" = "0" ]; then
-        notify "ComfyUI Update" "Update completed successfully."
-    else
-        notify "ComfyUI Update" "Update failed. Check terminal output." critical
+    cd "$COMFY_DIR" || {
+        echo "ComfyUI directory not found: $COMFY_DIR"
+        notify "ComfyUI Update" "Update failed: directory not found." critical
+        exit 1
+    }
+
+    VERSION_BEFORE=$(grep '^version' pyproject.toml | cut -d'"' -f2)
+    COMMIT_BEFORE=$(git log -1 --format="%h (%cd)" --date=local)
+    MANAGER_BEFORE=$(pip show comfyui-manager 2>/dev/null | grep '^Version' | cut -d' ' -f2)
+
+    echo "Updating ComfyUI core..."
+    if ! git pull; then
+        notify "ComfyUI Update" "git pull failed. Check terminal output." critical
         exit 1
     fi
+
+    echo ""
+    echo "Updating dependencies..."
+    if ! pip install -r requirements.txt; then
+        notify "ComfyUI Update" "Dependency update failed. Check terminal output." critical
+        exit 1
+    fi
+
+    echo ""
+    echo "Updating manager..."
+    if ! pip install -r manager_requirements.txt; then
+        notify "ComfyUI Update" "Manager update failed. Check terminal output." critical
+        exit 1
+    fi
+
+    VERSION_AFTER=$(grep '^version' pyproject.toml | cut -d'"' -f2)
+    COMMIT_AFTER=$(git log -1 --format="%h (%cd)" --date=local)
+    MANAGER_AFTER=$(pip show comfyui-manager 2>/dev/null | grep '^Version' | cut -d' ' -f2)
+
+    echo ""
+    echo "==============================="
+    echo "Update complete."
+    echo "==============================="
+    echo "Before:  v$VERSION_BEFORE  $COMMIT_BEFORE - Manager: $MANAGER_BEFORE"
+    echo "After:   v$VERSION_AFTER  $COMMIT_AFTER - Manager: $MANAGER_AFTER"
+    echo "==============================="
+    echo ""
+    echo "Start ComfyUI with: comfy"
+
+    notify "ComfyUI Update" "Update completed successfully."
 }
 
 case "$1" in
