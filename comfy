@@ -14,12 +14,12 @@
 COMFY_DIR="/mnt/sumpf/ai/ComfyUI"
 COMFY_URL="http://127.0.0.1:8188/"
 TMUX_SESSION="comfyui"
-CONDA_ENV="comfy2"
+CONDA_ENV="comfy"
 LISTEN_HOST="0.0.0.0"
 BRAVE_PROFILE="$HOME/.config/brave-comfy"
 APP_NAME="ComfyUI"
 ICON="$HOME/scripts/icons/selfhst--comfyui-light.svg"
-SCRIPT_VERSION="1.6.0"
+SCRIPT_VERSION="1.6.1"
 
 show_version() {
     echo "comfy script v$SCRIPT_VERSION"
