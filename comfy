@@ -18,11 +18,12 @@ TMUX_SESSION="comfyui"
 CONDA_ENV="comfy"
 BRAVE_PROFILE="$HOME/.config/brave-comfy"
 BRAVE_CLASS="Brave-browser"
+BRAVE_TAG=4
 COMFY_HOST=$(echo "$COMFY_URL" | sed -E 's#^[a-zA-Z]+://##; s#[:/].*$##')
 APP_NAME="ComfyUI"
 ICON="$HOME/scripts/icons/selfhst--comfyui-light.svg"
 COMFY_LAUNCH_CMD="python main.py --listen 0.0.0.0 --enable-manager"
-SCRIPT_VERSION="1.7.0"
+SCRIPT_VERSION="1.7.1"
 
 show_version() {
     echo "comfy script v$SCRIPT_VERSION"
@@ -168,7 +169,20 @@ reload_brave() {
         return
     fi
 
-    xdotool key --window "$WID" F5
+    xdotool key --clearmodifiers "alt+${BRAVE_TAG}"
+    sleep 0.15
+
+    eval $(xdotool getmouselocation --shell)
+    OLD_X=$X
+    OLD_Y=$Y
+
+    eval $(xdotool getwindowgeometry --shell "$WID")
+    xdotool mousemove $((X + WIDTH / 2)) $((Y + HEIGHT / 2))
+    xdotool key F5
+    sleep 0.3
+    xdotool key Return
+    xdotool mousemove "$OLD_X" "$OLD_Y"
+
     echo "Reloaded Brave."
 }
 
