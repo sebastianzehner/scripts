@@ -5,6 +5,7 @@
 # Usage:
 #   comfy          Start ComfyUI (if not already running) and open Brave
 #   comfy stop     Stop Brave (kiosk instance) and the ComfyUI tmux session
+#   comfy restart  Restart ComfyUI and reload Brave
 #   comfy update   Update ComfyUI (ComfyUI must be stopped first)
 #   comfy status   Show whether ComfyUI, Brave, and the tmux session are running
 #   comfy version  Show script, ComfyUI, and Manager version
@@ -15,11 +16,13 @@ COMFY_DIR="/mnt/sumpf/ai/ComfyUI"
 COMFY_URL="http://127.0.0.1:8188/"
 TMUX_SESSION="comfyui"
 CONDA_ENV="comfy"
-LISTEN_HOST="0.0.0.0"
 BRAVE_PROFILE="$HOME/.config/brave-comfy"
+BRAVE_CLASS="Brave-browser"
+COMFY_HOST=$(echo "$COMFY_URL" | sed -E 's#^[a-zA-Z]+://##; s#[:/].*$##')
 APP_NAME="ComfyUI"
 ICON="$HOME/scripts/icons/selfhst--comfyui-light.svg"
-SCRIPT_VERSION="1.6.2"
+COMFY_LAUNCH_CMD="python main.py --listen 0.0.0.0 --enable-manager"
+SCRIPT_VERSION="1.7.0"
 
 show_version() {
     echo "comfy script v$SCRIPT_VERSION"
@@ -50,23 +53,25 @@ notify() {
 
 show_help() {
     cat << EOF
-comfy script v$SCRIPT_VERSION - start/stop/update ComfyUI + Brave kiosk instance
+comfy script v$SCRIPT_VERSION - start/stop/restart ComfyUI + Brave kiosk instance
 
 Usage:
   comfy          Start ComfyUI (if not already running) and open Brave
                  pointed at the local web interface
   comfy stop     Stop the Brave kiosk instance and the ComfyUI tmux session
+  comfy restart  Restart ComfyUI and reload Brave
   comfy update   Update ComfyUI (ComfyUI must be stopped first)
   comfy status   Show whether ComfyUI, Brave, and the tmux session are running
   comfy version  Show script, ComfyUI, and Manager version
   comfy help     Show this help message
 
 Details:
-  - ComfyUI is started inside a detached tmux session named "$TMUX_SESSION"
+  - ComfyUI runs inside a detached tmux session named "$TMUX_SESSION"
     (attach with: tmux attach -t $TMUX_SESSION)
   - Brave runs with a separate profile ("$BRAVE_PROFILE"),
-    completely independent from your regular Brave instance
-  - Desktop notifications are sent via notify-send for start/stop/update events
+    independent from your regular Brave instance
+  - 'comfy restart' sends Ctrl+C into the tmux pane and restarts ComfyUI
+    there, then reloads Brave via xdotool/xprop (requires both installed)
 EOF
 }
 
@@ -99,14 +104,13 @@ start_comfy() {
 
         tmux kill-session -t "$TMUX_SESSION" 2>/dev/null
 
-        tmux new-session -d -s "$TMUX_SESSION" "
-            tmux rename-window 'comfy'
-            source '/opt/miniconda3/etc/profile.d/conda.sh'
-            conda activate '$CONDA_ENV'
-            cd '$COMFY_DIR'
-            export COMFYUI_MODEL_PATH='$COMFY_DIR/models'
-            python main.py --listen $LISTEN_HOST --enable-manager
-        "
+        tmux new-session -d -s "$TMUX_SESSION" -n comfy
+
+        tmux send-keys -t "$TMUX_SESSION" "source '/opt/miniconda3/etc/profile.d/conda.sh'" Enter
+        tmux send-keys -t "$TMUX_SESSION" "conda activate '$CONDA_ENV'" Enter
+        tmux send-keys -t "$TMUX_SESSION" "cd '$COMFY_DIR'" Enter
+        tmux send-keys -t "$TMUX_SESSION" "export COMFYUI_MODEL_PATH='$COMFY_DIR/models'" Enter
+        tmux send-keys -t "$TMUX_SESSION" "$COMFY_LAUNCH_CMD" Enter
 
         echo -n "Waiting for ComfyUI"
         for i in $(seq 1 60); do
@@ -140,6 +144,34 @@ start_brave() {
       --disable-save-password-bubble
 }
 
+reload_brave() {
+    if ! pgrep -f "brave-comfy" > /dev/null 2>&1; then
+        return
+    fi
+
+    if ! command -v xdotool > /dev/null 2>&1 || ! command -v xprop > /dev/null 2>&1; then
+        echo "xdotool/xprop not found, skipping Brave reload."
+        return
+    fi
+
+    WID=""
+    for candidate in $(xdotool search --class "$BRAVE_CLASS" 2>/dev/null); do
+
+        if xprop -id "$candidate" WM_CLASS 2>/dev/null | grep -q "\"$COMFY_HOST\""; then
+            WID="$candidate"
+            break
+        fi
+    done
+
+    if [ -z "$WID" ]; then
+        echo "Could not find the Brave (ComfyUI) window, skipping reload."
+        return
+    fi
+
+    xdotool key --window "$WID" F5
+    echo "Reloaded Brave."
+}
+
 stop_all() {
     echo "Stopping Brave..."
     pkill -f "brave-comfy" 2>/dev/null
@@ -149,6 +181,61 @@ stop_all() {
 
     echo "Done."
     notify "ComfyUI" "Brave and ComfyUI stopped."
+}
+
+restart_comfy() {
+    if ! curl -s --head --max-time 1 "$COMFY_URL" > /dev/null 2>&1; then
+        echo "ComfyUI is not running, starting it fresh instead."
+        start_comfy
+        start_brave
+        return
+    fi
+
+    if ! tmux has-session -t "$TMUX_SESSION" 2>/dev/null; then
+        echo "ComfyUI is reachable, but the tmux session '$TMUX_SESSION' is gone."
+        echo "Can't send it a restart. Try: comfy stop && comfy"
+        notify "ComfyUI" "Restart failed: tmux session not found." critical
+        exit 1
+    fi
+
+    echo "Restarting ComfyUI..."
+    notify "ComfyUI" "Restarting ComfyUI, please wait..."
+
+    tmux send-keys -t "$TMUX_SESSION" C-c
+
+    echo -n "Waiting for ComfyUI to shut down"
+    for i in $(seq 1 15); do
+        if ! curl -s --head --max-time 1 "$COMFY_URL" > /dev/null 2>&1; then
+            echo " -> stopped."
+            break
+        fi
+        echo -n "."
+        sleep 1
+    done
+
+    tmux send-keys -t "$TMUX_SESSION" "$COMFY_LAUNCH_CMD" Enter
+
+    echo -n "Waiting for ComfyUI to come back"
+    for i in $(seq 1 60); do
+        if curl -s --head --max-time 1 "$COMFY_URL" > /dev/null 2>&1; then
+            echo " -> ready!"
+            break
+        fi
+        echo -n "."
+        sleep 1
+    done
+
+    if ! curl -s --head --max-time 1 "$COMFY_URL" > /dev/null 2>&1; then
+        echo "ComfyUI did not come back within 60 seconds."
+        echo "Check: tmux attach -t $TMUX_SESSION"
+        notify "ComfyUI" "Restart failed, check tmux session." critical
+        exit 1
+    fi
+
+    reload_brave
+
+    echo "ComfyUI restarted."
+    notify "ComfyUI" "ComfyUI restarted and ready."
 }
 
 update_comfy() {
@@ -214,6 +301,9 @@ update_comfy() {
 case "$1" in
     stop)
         stop_all
+        ;;
+    restart)
+        restart_comfy
         ;;
     update)
         update_comfy
