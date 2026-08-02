@@ -19,7 +19,7 @@ LISTEN_HOST="0.0.0.0"
 BRAVE_PROFILE="$HOME/.config/brave-comfy"
 APP_NAME="ComfyUI"
 ICON="$HOME/scripts/icons/selfhst--comfyui-light.svg"
-SCRIPT_VERSION="1.6.1"
+SCRIPT_VERSION="1.6.2"
 
 show_version() {
     echo "comfy script v$SCRIPT_VERSION"
@@ -36,7 +36,7 @@ show_version() {
     COMFY_COMMIT=$(git log -1 --format="%h (%cd)" --date=local)
 
     source "/opt/miniconda3/etc/profile.d/conda.sh"
-    conda activate comfy2
+    conda activate "$CONDA_ENV"
     MANAGER_VERSION=$(pip show comfyui-manager 2>/dev/null | grep '^Version' | cut -d' ' -f2)
 
     echo "ComfyUI:  v$COMFY_VERSION  $COMFY_COMMIT"
