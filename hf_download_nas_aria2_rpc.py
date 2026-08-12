@@ -404,6 +404,11 @@ def main():
             "remove-control-file": "true",
         }
 
+        # Pass HF token to aria2 HTTP requests if present
+        token = args.hf_token or os.environ.get("HF_HUB_TOKEN")
+        if token:
+            options["header"] = [f"Authorization: Bearer {token}"]
+
         params = [f"token:{rpc_secret}", [url], options]
         aria2_rpc(rpc_url, "addUri", params)
         print(f"→ queued: {f}")
