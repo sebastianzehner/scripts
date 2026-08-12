@@ -7,6 +7,10 @@ on a remote aria2 instance (e.g. running on a NAS), placing them in
 a per-repo subdirectory. The NAS SSH user is resolved automatically
 from ~/.ssh/config (via 'ssh -G'), unless overridden with --nas-user.
 
+Authentication:
+Uses the token cached by 'hf auth login' automatically.
+Alternatively, set the HF_HUB_TOKEN environment variable or pass --hf-token.
+
 Before running any SSH commands, the script waits for the local SSH
 agent (e.g. provided by KeePassXC) to have at least one identity
 loaded, so it doesn't fail if KeePassXC is still locked.
@@ -22,7 +26,9 @@ import time
 from pathlib import Path
 
 import requests
-from huggingface_hub import HfApi, hf_hub_url
+from huggingface_hub import HfApi, get_token, hf_hub_url
+
+__version__ = "1.0.0"
 
 
 def aria2_rpc(rpc_url, method, params):
@@ -222,6 +228,13 @@ def main():
         description="Download HF repo on NAS via aria2 RPC"
     )
     parser.add_argument(
+        "--version",
+        "-v",
+        action="version",
+        version=f"%(prog)s {__version__}",
+        help="Show script's version number and exit",
+    )
+    parser.add_argument(
         "repo",
         nargs="?",
         default=None,
@@ -234,7 +247,11 @@ def main():
     # Tokens (explicit & unambiguous)
     parser.add_argument(
         "--hf-token",
-        help="Hugging Face access token (optional, required for private/gated repos)",
+        help=(
+            "Hugging Face access token (optional, required for private/gated repos). "
+            "If omitted, the script automatically uses the token from 'hf auth login' "
+            "or the HF_HUB_TOKEN environment variable."
+        ),
     )
     parser.add_argument(
         "--rpc-secret-file",
@@ -319,9 +336,10 @@ def main():
         print("❌ Aborting: no SSH agent identities available.")
         return
 
-    # HF auth
-    if args.hf_token:
-        os.environ["HF_HUB_TOKEN"] = args.hf_token
+    # Set HF token for HfApi if available
+    token = args.hf_token or os.environ.get("HF_HUB_TOKEN") or get_token()
+    if token:
+        os.environ["HF_HUB_TOKEN"] = token
 
     rpc_url = f"http://{args.nas_host}:{args.rpc_port}/jsonrpc"
     repo_dirname = args.repo.split("/")[-1]
@@ -404,8 +422,8 @@ def main():
             "remove-control-file": "true",
         }
 
-        # Pass HF token to aria2 HTTP requests if present
-        token = args.hf_token or os.environ.get("HF_HUB_TOKEN")
+        # Resolve HF token: CLI argument -> environment variable -> local 'hf auth login' cache
+        token = args.hf_token or os.environ.get("HF_HUB_TOKEN") or get_token()
         if token:
             options["header"] = [f"Authorization: Bearer {token}"]
 
