@@ -1,0 +1,403 @@
+#!/bin/bash
+# Interactive khal wrapper: create events, list them, edit/delete via search.
+# German UI throughout (events themselves are in German too). Requires fzf.
+#
+# termin [-c KALENDER]                        create a new event
+# termin anzeigen|a [ARGS...]                 show events (khal list)
+# termin bearbeiten|b [-v] [SUCHBEGRIFF...]   search/edit/delete events
+# termin hilfe|-h|--help|help|h
+
+set -uo pipefail
+
+VERSION="1.0"
+khal_config="${KHAL_CONFIG:-$HOME/.config/khal/config}"
+
+# --- configuration ---------------------------------------------------------
+CALDAV_CREDENTIAL="baikal-caldav-sebastian"
+VDIRSYNCER_PAIR="baikal_sebastian"
+GERMAN_LOCALE="de_DE.utf8"
+FZF_OPTS=(--height=~40% --reverse)
+KHAL_EDIT_COLUMNS=1000   # avoids khal wrapping its prompt when piped
+KHAL_EDIT_READ_TIMEOUT=0.3   # seconds; signals khal is waiting for input
+
+# Prompt color; reset before user input so only the question is colored.
+BLUE=$'\033[34m'
+RED=$'\033[31m'
+RESET=$'\033[0m'
+
+# vdirsyncer needs CREDENTIALS_DIRECTORY, only set under systemd — run via
+# systemd-run (a sudoers rule allows this exact command without a password).
+sync_now() {
+	sudo systemd-run --uid="$(id -u)" --pty --quiet \
+		--property="LoadCredentialEncrypted=${CALDAV_CREDENTIAL}" \
+		vdirsyncer sync "$VDIRSYNCER_PAIR"
+}
+
+# --- "hilfe" / "-h" / "--help" / "help" / "h" -------------------------------
+
+if [[ "${1-}" =~ ^(-h|--help|help|hilfe|h)$ ]]; then
+	cat <<-EOF
+	termin ${VERSION} — Termine per khal (Baikal-Sync)
+
+	  termin                  neuen Termin anlegen
+	  termin -c KALENDER      ...ohne Kalenderauswahl per fzf
+	  termin anzeigen    | a  Termine anzeigen (khal list)
+	  termin bearbeiten  | b  Termine suchen/ändern/löschen
+	  termin hilfe       | h  diese Hilfe
+
+	Details: termin anzeigen -h · termin bearbeiten -h
+	Benötigt: fzf, ~/.config/khal/config
+	EOF
+	exit 0
+fi
+
+# --- "anzeigen" subcommand -------------------------------------------------
+
+# German date words → what khal understands (today, tomorrow, monday, ...).
+declare -A DATE_WORDS=(
+	[heute]=today
+	[morgen]=tomorrow
+	[montag]=monday   [mo]=mon
+	[dienstag]=tuesday [di]=tue
+	[mittwoch]=wednesday [mi]=wed
+	[donnerstag]=thursday [do]=thu
+	[freitag]=friday  [fr]=fri
+	[samstag]=saturday [sa]=sat
+	[sonntag]=sunday  [so]=sun
+)
+
+if [[ "${1-}" =~ ^(anzeigen|a)$ ]]; then
+	shift
+
+	if [[ "${1-}" =~ ^(-h|--help|help|hilfe|h)$ ]]; then
+		cat <<-EOF
+		termin anzeigen [ARGUMENTE...]   (kurz: a)
+
+		  Wrapper um "khal list". Versteht heute, morgen, montag/mo,
+		  dienstag/di, mittwoch/mi, donnerstag/do, freitag/fr, samstag/sa,
+		  sonntag/so — sowie alles, was khal selbst versteht (today, 7d,
+		  konkrete Daten).
+
+		    termin a heute morgen
+		EOF
+		exit 0
+	fi
+
+	args=()
+	for arg in "$@"; do
+		key="${arg,,}"
+		if [[ -v DATE_WORDS[$key] ]]; then
+			args+=("${DATE_WORDS[$key]}")
+		else
+			args+=("$arg")
+		fi
+	done
+	# khal has no built-in translation for "Today"/"Tomorrow" (hardcoded);
+	# patched here via sed.
+	LC_TIME=$GERMAN_LOCALE khal list "${args[@]}" | sed -e 's/^Today,/Heute,/' -e 's/^Tomorrow,/Morgen,/'
+	exit "${PIPESTATUS[0]}"
+fi
+
+# --- "bearbeiten" / "b" subcommand -----------------------------------------
+
+if [[ "${1-}" =~ ^(bearbeiten|b)$ ]]; then
+	shift
+
+	if [[ "${1-}" =~ ^(-h|--help|help|hilfe|h)$ ]]; then
+		cat <<-EOF
+		termin bearbeiten [-v] [SUCHBEGRIFF...]   (kurz: b)
+
+		  Sucht Termine, bearbeitet/löscht sie interaktiv (khal edit),
+		  synct danach. -v bezieht auch vergangene Termine ein.
+		  Für Aufgaben: "todo edit <id>" verwenden.
+
+		    termin b Zahnarzt
+		EOF
+		exit 0
+	fi
+
+	show_past=""
+	if [[ "${1-}" =~ ^(-v|--vergangene)$ ]]; then
+		show_past="--show-past"
+		shift
+	fi
+
+	if [ "$#" -gt 0 ]; then
+		suchbegriff="$*"
+	else
+		read -erp "${BLUE}Suchbegriff: ${RESET}" suchbegriff
+	fi
+
+	# khal's "Edit? [n]o ..." menu has no trailing newline. We read its
+	# output char-by-char: complete lines pass through as-is, the exact
+	# menu text is intercepted and offered via fzf, everything else is
+	# relayed untouched once khal pauses waiting for input.
+	edit_prompt="Edit?  [n]o  [q]uit  [s]ummary  [d]escription  da[t]etime range  re[p]eat  [l]ocation  [c]ategories  [a]larm  [D]elete  [u]rl: "
+
+	action_labels=("Nein" "Titel" "Beschreibung" "Zeitraum" "Wiederkehrend" "Ort" "Kategorien" "Erinnerung" "Löschen" "URL" "Beenden")
+	action_keys=("n" "s" "d" "t" "p" "l" "c" "a" "D" "u" "q")
+
+	ask_edit_action() {
+		local choice i
+		choice=$(printf '%s\n' "${action_labels[@]}" | fzf --prompt="Bearbeiten? " "${FZF_OPTS[@]}")
+		if [ -z "$choice" ]; then
+			printf 'q'
+			return
+		fi
+		for i in "${!action_labels[@]}"; do
+			if [ "${action_labels[$i]}" = "$choice" ]; then
+				printf '%s' "${action_keys[$i]}"
+				return
+			fi
+		done
+		printf 'q'
+	}
+
+	coproc KHAL { COLUMNS=$KHAL_EDIT_COLUMNS khal edit ${show_past} "$suchbegriff"; }
+	khal_pid="$KHAL_PID"
+
+	# Known one-line follow-up prompts get translated; t/p/a (more
+	# complex flows) are left untouched in English.
+	declare -A FIELD_LABELS=(
+		[s]="summary:Titel"
+		[d]="description:Beschreibung"
+		[l]="location:Ort"
+		[c]="categories:Kategorien"
+		[u]="url:URL"
+	)
+	last_action=""
+
+	buffer=""
+	while true; do
+		if IFS= read -r -t "$KHAL_EDIT_READ_TIMEOUT" -N 1 -u "${KHAL[0]}" ch; then
+			if [ "$ch" = $'\n' ]; then
+				printf '%s\n' "$buffer"
+				buffer=""
+				continue
+			fi
+			buffer+="$ch"
+			if [ "$buffer" = "$edit_prompt" ]; then
+				action=$(ask_edit_action)
+				last_action="$action"
+				printf '%s\n' "$action" >&"${KHAL[1]}"
+				buffer=""
+			fi
+		else
+			if ! kill -0 "$khal_pid" 2>/dev/null; then
+				[ -n "$buffer" ] && printf '%s' "$buffer"
+				break
+			fi
+			if [ -n "$buffer" ]; then
+				mapping="${FIELD_LABELS[$last_action]-}"
+				english="${mapping%%:*}"
+				german="${mapping#*:}"
+				if [ -n "$mapping" ] && [[ "$buffer" == "$english"* ]]; then
+					rest="${buffer#"$english"}"
+					# khal's own hint for how to actually clear the field
+					# (plain Enter just keeps the shown old value).
+					rest="${rest/(or \"None\")/(oder \"None\" zum Löschen)}"
+					if [[ "$rest" == *"["*"]"* ]]; then
+						before_bracket="${rest%%\[*}"
+						after_bracket_start="${rest#*\[}"
+						bracket_content="${after_bracket_start%%\]*}"
+						after_bracket="${after_bracket_start#*\]}"
+						printf '%s%s%s%s%s%s%s' \
+							"$BLUE" "$german" "$before_bracket" \
+							"$RED" "[$bracket_content]" \
+							"$BLUE" "$after_bracket$RESET"
+					else
+						printf '%s%s%s%s' "$BLUE" "$german" "$rest" "$RESET"
+					fi
+				else
+					printf '%s' "$buffer"
+				fi
+				buffer=""
+			fi
+			last_action=""
+			if IFS= read -r antwort; then
+				printf '%s\n' "$antwort" >&"${KHAL[1]}"
+			else
+				break
+			fi
+		fi
+	done
+	wait "$khal_pid" 2>/dev/null
+
+	sync_now
+	exit 0
+fi
+
+# --- helpers -----------------------------------------------------------
+
+# "9" -> "9:00", leaves "9:30" etc. untouched.
+pad_time() {
+	local t="$1"
+	if [[ "$t" =~ ^[0-9]{1,2}$ ]]; then
+		printf '%s:00' "$t"
+	else
+		printf '%s' "$t"
+	fi
+}
+
+# Strip leading zero (bash treats "08"/"09" as invalid octal otherwise).
+strip_leading_zero() {
+	local v="$1"
+	v="${v#0}"
+	printf '%s' "${v:-0}"
+}
+
+# Accepts "D.M", "D.M.", or bare "D" (day only, current month).
+parse_date_input() {
+	local input="$1"
+	if [[ "$input" =~ ^([0-9]{1,2})\.([0-9]{1,2})\.?$ ]]; then
+		day=$(printf '%02d' "${BASH_REMATCH[1]}")
+		month=$(printf '%02d' "${BASH_REMATCH[2]}")
+		return 0
+	elif [[ "$input" =~ ^([0-9]{1,2})$ ]]; then
+		day=$(printf '%02d' "${BASH_REMATCH[1]}")
+		month=$(date +%m)
+		return 0
+	fi
+	return 1
+}
+
+# Re-prompts on invalid input instead of aborting the script.
+read_date() {
+	local prompt="$1"
+	read -erp "$prompt" date_input
+	while [ -n "$date_input" ] && ! parse_date_input "$date_input"; do
+		echo "Ungültiges Datumsformat, erwartet wird T.M. oder nur T."
+		read -erp "$prompt" date_input
+	done
+}
+
+build_summary() {
+	local reminder_text="keine"
+	[ -n "$reminder" ] && reminder_text="${reminder} Minuten"
+	printf '%s - %s - %s - %s.%s.%s - %s bis %s - Erinnerung %s\n' \
+		"$calendar" "$my_event" "$location" "$day" "$month" "$yr" \
+		"$start_time" "$end_time" "$reminder_text"
+}
+
+main() {
+	start_time="$(pad_time "$start_time")"
+	end_time="$(pad_time "$end_time")"
+
+	if [ -n "$date_input" ]; then
+		parse_date_input "$date_input"
+	else
+		month=$(date +%m)
+		day=$(date +%d)
+	fi
+
+	yr=$(date +%Y)
+	local current_month selected_month
+	current_month=$(strip_leading_zero "$(date +%m)")
+	selected_month=$(strip_leading_zero "$month")
+	if ((current_month > selected_month)); then
+		yr=$((yr + 1))
+	fi
+
+	read -rp "$(build_summary)"$'\n'"${BLUE}Ist das korrekt? (J/n): ${RESET}" option
+}
+
+# Shared between initial input and the edit loop.
+# Index 2 (start time) also asks index 3 (end time) right after.
+entry=("${BLUE}Termin: ${RESET}" "${BLUE}Datum (T.M.): ${RESET}" "${BLUE}Startzeit: ${RESET}" "${BLUE}Endzeit: ${RESET}" "${BLUE}Ort: ${RESET}" "${BLUE}Erinnerung (Minuten): ${RESET}")
+entry_var=("my_event" "date_input" "start_time" "end_time" "location" "reminder")
+entry_label=("Termin" "Datum" "Startzeit" "Endzeit" "Ort" "Erinnerung")
+
+# --- argument parsing ----------------------------------------------------
+
+calendar=""
+while getopts ":c:" opt; do
+	case "$opt" in
+		c) calendar="$OPTARG" ;;
+		*) echo "Verwendung: $0 [-c KALENDER]" >&2; exit 1 ;;
+	esac
+done
+
+# --- calendar selection via fzf -------------------------------------------
+
+if [ -z "$calendar" ]; then
+	if ! command -v fzf >/dev/null; then
+		echo "fzf ist nicht installiert. Installieren oder -c KALENDER direkt angeben." >&2
+		exit 1
+	fi
+	if [ ! -f "$khal_config" ]; then
+		echo "khal-Konfiguration nicht gefunden unter $khal_config" >&2
+		exit 1
+	fi
+	# [[name]] marks calendar aliases; other sections use single brackets,
+	# so this pattern matches only actual calendar names.
+	mapfile -t calendars < <(grep -oP '(?<=^\[\[)[^]]+(?=\]\]$)' "$khal_config")
+	if [ "${#calendars[@]}" -eq 0 ]; then
+		echo "Keine Kalender in $khal_config gefunden" >&2
+		exit 1
+	fi
+	calendar=$(printf '%s\n' "${calendars[@]}" | fzf --prompt="Kalender> " "${FZF_OPTS[@]}")
+	[ -z "$calendar" ] && exit 1
+fi
+
+# --- initial input ---------------------------------------------------------
+
+read -erp "${entry[0]}" my_event
+
+echo
+
+# German month/weekday names, without touching the system-wide locale.
+LC_TIME=$GERMAN_LOCALE cal -n 2 2>/dev/null || LC_TIME=$GERMAN_LOCALE cal -A 1 2>/dev/null || cal
+
+echo
+
+read_date "${entry[1]}"
+
+read -erp "${entry[2]}" start_time
+start_time=${start_time//am/}
+if echo "$start_time" | grep -q 'pm'; then
+	echo "Bitte 24-Stunden-Format verwenden."
+	read -erp "${entry[2]}" start_time
+fi
+
+read -erp "${entry[3]}" end_time
+read -erp "${entry[4]}" location
+read -erp "${entry[5]}" reminder
+
+main
+
+while [ -n "$option" ] && [[ ! "${option,,}" =~ ^(j|y)$ ]]; do
+	choice=$(printf '%s\n' "${entry_label[@]}" | fzf --prompt="Feld bearbeiten> " "${FZF_OPTS[@]}")
+	[ -z "$choice" ] && continue
+
+	num=-1
+	for i in "${!entry_label[@]}"; do
+		[ "${entry_label[$i]}" == "$choice" ] && num="$i" && break
+	done
+	[ "$num" -eq -1 ] && continue
+
+	if [ "$num" -eq 1 ]; then
+		read_date "${entry[$num]}"
+	else
+		read -erp "${entry[$num]}" "${entry_var[$num]}"
+	fi
+	if [ "$num" -eq 2 ]; then
+		((num++))
+		read -erp "${entry[$num]}" "${entry_var[$num]}"
+	fi
+	main
+done
+
+# DD.MM.YYYY matches khal's configured dateformat (ISO fails).
+# --alarms/--location only set when filled in, otherwise builds an
+# invalid "--alarms minutes" and khal aborts.
+khal_args=(--calendar "${calendar}")
+[ -n "$reminder" ] && khal_args+=(--alarms "${reminder}minutes")
+[ -n "$location" ] && khal_args+=(--location "${location}")
+khal_args+=("${day}.${month}.${yr}" "$start_time" "$end_time" "$my_event")
+
+if ! khal new "${khal_args[@]}"; then
+	echo "khal new ist fehlgeschlagen — kein Sync durchgeführt." >&2
+	exit 1
+fi
+
+sync_now
