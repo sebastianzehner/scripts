@@ -9,7 +9,7 @@
 
 set -uo pipefail
 
-VERSION="1.0"
+VERSION="1.1"
 khal_config="${KHAL_CONFIG:-$HOME/.config/khal/config}"
 
 # --- configuration ---------------------------------------------------------
@@ -128,10 +128,8 @@ if [[ "${1-}" =~ ^(bearbeiten|b)$ ]]; then
 		read -erp "${BLUE}Suchbegriff: ${RESET}" suchbegriff
 	fi
 
-	# khal's "Edit? [n]o ..." menu has no trailing newline. We read its
-	# output char-by-char: complete lines pass through as-is, the exact
-	# menu text is intercepted and offered via fzf, everything else is
-	# relayed untouched once khal pauses waiting for input.
+	# khal's "Edit?" menu has no trailing newline. We read output char-by-char:
+  # known text is intercepted for fzf, everything else relays untouched once khal pauses waiting for input.
 	edit_prompt="Edit?  [n]o  [q]uit  [s]ummary  [d]escription  da[t]etime range  re[p]eat  [l]ocation  [c]ategories  [a]larm  [D]elete  [u]rl: "
 
 	action_labels=("Nein" "Titel" "Beschreibung" "Zeitraum" "Wiederkehrend" "Ort" "Kategorien" "Erinnerung" "Löschen" "URL" "Beenden")
@@ -153,17 +151,57 @@ if [[ "${1-}" =~ ^(bearbeiten|b)$ ]]; then
 		printf 'q'
 	}
 
+	# khal only accepts these four English keywords for frequency
+	repeat_labels=("Keine (löschen)" "Täglich" "Wöchentlich" "Monatlich" "Jährlich")
+	repeat_keys=("None" "daily" "weekly" "monthly" "yearly")
+
+	ask_repeat_frequency() {
+		local choice i
+		choice=$(printf '%s\n' "${repeat_labels[@]}" | fzf --prompt="Wiederkehrend? " "${FZF_OPTS[@]}")
+		repeat_freq_key="None"
+		repeat_freq_label="Keine (löschen)"
+		[ -z "$choice" ] && return
+		for i in "${!repeat_labels[@]}"; do
+			if [ "${repeat_labels[$i]}" = "$choice" ]; then
+				repeat_freq_key="${repeat_keys[$i]}"
+				repeat_freq_label="$choice"
+				return
+			fi
+		done
+	}
+
+	# Renders "<label><rest, with the [default] part in red>",
+  # translating khal's own "(or "None")" clearing hint along the way.
+	render_prompt() {
+		local label="$1" rest="$2"
+		rest="${rest/(or \"None\")/(oder \"None\" zum Löschen)}"
+		if [[ "$rest" == *"["*"]"* ]]; then
+			local before after_start content after
+			before="${rest%%\[*}"
+			after_start="${rest#*\[}"
+			content="${after_start%%\]*}"
+			after="${after_start#*\]}"
+			printf '%s%s%s%s%s%s%s' \
+				"$BLUE" "$label" "$before" \
+				"$RED" "[$content]" \
+				"$BLUE" "$after$RESET"
+		else
+			printf '%s%s%s%s' "$BLUE" "$label" "$rest" "$RESET"
+		fi
+	}
+
 	coproc KHAL { COLUMNS=$KHAL_EDIT_COLUMNS khal edit ${show_past} "$suchbegriff"; }
 	khal_pid="$KHAL_PID"
 
-	# Known one-line follow-up prompts get translated; t/p/a (more
-	# complex flows) are left untouched in English.
+	# One-line follow-ups get translated; "p" also gets a German fzf
+	# picker for frequency. "t" (datetime range) stays untouched.
 	declare -A FIELD_LABELS=(
 		[s]="summary:Titel"
 		[d]="description:Beschreibung"
 		[l]="location:Ort"
 		[c]="categories:Kategorien"
 		[u]="url:URL"
+		[a]="alarm:Erinnerung (z. B. 10m, 1h)"
 	)
 	last_action=""
 
@@ -187,34 +225,56 @@ if [[ "${1-}" =~ ^(bearbeiten|b)$ ]]; then
 				[ -n "$buffer" ] && printf '%s' "$buffer"
 				break
 			fi
-			if [ -n "$buffer" ]; then
-				mapping="${FIELD_LABELS[$last_action]-}"
-				english="${mapping%%:*}"
-				german="${mapping#*:}"
-				if [ -n "$mapping" ] && [[ "$buffer" == "$english"* ]]; then
-					rest="${buffer#"$english"}"
-					# khal's own hint for how to actually clear the field
-					# (plain Enter just keeps the shown old value).
-					rest="${rest/(or \"None\")/(oder \"None\" zum Löschen)}"
-					if [[ "$rest" == *"["*"]"* ]]; then
-						before_bracket="${rest%%\[*}"
-						after_bracket_start="${rest#*\[}"
-						bracket_content="${after_bracket_start%%\]*}"
-						after_bracket="${after_bracket_start#*\]}"
-						printf '%s%s%s%s%s%s%s' \
-							"$BLUE" "$german" "$before_bracket" \
-							"$RED" "[$bracket_content]" \
-							"$BLUE" "$after_bracket$RESET"
-					else
-						printf '%s%s%s%s' "$BLUE" "$german" "$rest" "$RESET"
-					fi
-				else
-					printf '%s' "$buffer"
-				fi
+			# Empty buffer = khal just hasn't produced output yet,
+      # not waiting for input — keep waiting instead of blocking on stdin.
+			[ -z "$buffer" ] && continue
+
+			was_alarm=0
+			if [ "$last_action" = "p" ] && [[ "$buffer" == frequency* ]]; then
+				ask_repeat_frequency
+				printf '%s%s%s%s\n' "$BLUE" "Wiederkehrend: " "$RESET" "$repeat_freq_label"
+				printf '%s\n' "$repeat_freq_key" >&"${KHAL[1]}"
 				buffer=""
+				continue
 			fi
+			if [ "$last_action" = "p" ] && [[ "$buffer" == until* ]]; then
+				render_prompt "Bis wann (TT.MM.JJJJ)" "${buffer#until}"
+				buffer=""
+				last_action=""
+				if ! IFS= read -r antwort; then
+					break
+				fi
+				while [ -n "$antwort" ] && [ "$antwort" != "None" ] \
+					&& ! [[ "$antwort" =~ ^[0-9]{1,2}\.[0-9]{1,2}\.[0-9]{4}$ ]]; do
+					echo 'Bitte volles Datum TT.MM.JJJJ angeben, oder "None".'
+					read -erp "${BLUE}Bis wann (TT.MM.JJJJ): ${RESET}" antwort
+				done
+				printf '%s\n' "$antwort" >&"${KHAL[1]}"
+				continue
+			fi
+			[ "$last_action" = "a" ] && was_alarm=1
+			mapping=""
+			[ -n "$last_action" ] && mapping="${FIELD_LABELS[$last_action]-}"
+			english="${mapping%%:*}"
+			german="${mapping#*:}"
+			if [ -n "$mapping" ] && [[ "$buffer" == "$english"* ]]; then
+				rest="${buffer#"$english"}"
+				render_prompt "$german" "$rest"
+			else
+				printf '%s' "$buffer"
+			fi
+			buffer=""
 			last_action=""
-			if IFS= read -r antwort; then
+			if [ "$was_alarm" -eq 1 ]; then
+				if ! IFS= read -r antwort; then
+					break
+				fi
+				while [ -n "$antwort" ] && [[ "$antwort" =~ ^[0-9]+$ ]]; do
+					echo 'Bitte eine Einheit angeben (z. B. 10m, 1h) oder "None".'
+					read -erp "${BLUE}Erinnerung (z. B. 10m, 1h): ${RESET}" antwort
+				done
+				printf '%s\n' "$antwort" >&"${KHAL[1]}"
+			elif IFS= read -r antwort; then
 				printf '%s\n' "$antwort" >&"${KHAL[1]}"
 			else
 				break
