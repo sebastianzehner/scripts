@@ -1,0 +1,5 @@
+#!/usr/bin/env bash
+
+# Launch Telegram as a detached background process
+nohup Telegram "$@" >/dev/null 2>&1 &
+disown
