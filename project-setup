@@ -1,0 +1,281 @@
+#!/usr/bin/env bash
+# project-setup
+#
+# Interactive:
+# Scaffolds formatting configs for detected languages and lets you pick project skills via fzf.
+#
+# Non-interactive:
+# Only scaffolds configs; skill picking is always skipped since fzf needs a real terminal.
+#
+# Skills inside a 2+-skill category folder are hidden by default in favor of one whole-folder entry
+#
+# --all to list them individually.
+# --no-skills to skip them all.
+
+set -euo pipefail
+
+GLOBAL_SKILLS_DIR="$HOME/.pi/agent/skills"
+SKILLS_REPO_DIR="/mnt/sumpf/ai/skills"
+TARGET_DIR=".agents/skills"
+
+# Whatever is linked globally under GLOBAL_SKILLS_DIR — don't offer these again per project.
+mapfile -t GLOBAL_SKILLS < <(find "$GLOBAL_SKILLS_DIR" -maxdepth 1 -mindepth 1 -printf '%f\n' 2>/dev/null | sort)
+
+# Skills/categories to hide entirely, matched against the path relative to SKILLS_REPO_DIR
+BLACKLIST=(
+  "mattpocock-skills/skills/misc"
+  "mattpocock-skills/skills/in-progress"
+  "python-skills/skills/go"
+  "python-skills/skills/javascript"
+  "python-skills/skills/rust"
+  "python-skills/skills/scala"
+  "python-skills/skills/swift"
+)
+
+SKIP_SKILLS=false
+SHOW_ALL=false
+for arg in "$@"; do
+  case "$arg" in
+    --no-skills) SKIP_SKILLS=true ;;
+    --all) SHOW_ALL=true ;;
+  esac
+done
+
+is_global() {
+  local name="$1"
+  for g in "${GLOBAL_SKILLS[@]}"; do
+    [[ "$name" == "$g" ]] && return 0
+  done
+  return 1
+}
+
+# Strips "skill"/"skills" path segments from the display label — cosmetic only, doesn't affect the real path.
+strip_boilerplate_segments() {
+  local rel="$1"
+  local IFS='/'
+  local -a parts
+  read -ra parts <<<"$rel"
+  local -a kept=()
+  local part
+  for part in "${parts[@]}"; do
+    case "$part" in
+      skill | skills) continue ;;
+      *) kept+=("$part") ;;
+    esac
+  done
+  local out="${kept[*]}"
+  echo "$out"
+}
+
+# Matches rel exactly, or anything nested under it, against BLACKLIST.
+is_blacklisted() {
+  local rel="$1"
+  for pattern in "${BLACKLIST[@]}"; do
+    [ -z "$pattern" ] && continue
+    case "$rel" in
+      "$pattern" | "$pattern"/*) return 0 ;;
+    esac
+  done
+  return 1
+}
+
+# Find any file matching the given -name patterns, skipping .git/node_modules.
+# Prints one match (if any) and returns success/failure accordingly.
+has_file_matching() {
+  local expr=()
+  for pattern in "$@"; do
+    [ "${#expr[@]}" -gt 0 ] && expr+=(-o)
+    expr+=(-name "$pattern")
+  done
+  find . -maxdepth 6 \( -path "*/.git" -o -path "*/node_modules" \) -prune -o \
+    -type f \( "${expr[@]}" \) -print -quit
+}
+
+# --- Formatting configs (only for languages actually present) ---
+wants_prettier=false
+[ -n "$(has_file_matching '*.js' '*.jsx' '*.ts' '*.tsx' '*.css' '*.html' '*.json' '*.yaml' '*.yml' '*.graphql' '*.liquid' '*.md' '*.mdx')" ] && wants_prettier=true
+
+wants_python=false
+[ -n "$(has_file_matching '*.py')" ] && wants_python=true
+
+wants_lua=false
+[ -n "$(has_file_matching '*.lua')" ] && wants_lua=true
+
+# Nothing recognized:
+# Ask (interactive) which languages to scaffold for, or just report it and create nothing.
+if ! $wants_prettier && ! $wants_python && ! $wants_lua; then
+  if $SKIP_SKILLS || [ ! -t 0 ] || [ ! -t 1 ]; then
+    echo "No recognized language files found (JS/TS/web, Python, or Lua)."
+    echo "Nothing was created. Run 'project-setup' again once language files exist,"
+    echo "or run it interactively to pick languages manually."
+  else
+    mapfile -t lang_choices < <(
+      printf '%s\n' \
+        "prettier (JS/TS/CSS/HTML/JSON/YAML/GraphQL/Liquid/Markdown)" \
+        "python (black + isort)" \
+        "lua (stylua)" |
+        fzf --multi \
+          --bind 'tab:toggle+down,shift-tab:toggle+up' \
+          --prompt="No language files detected — scaffold configs for> " \
+          --header="Tab = toggle selection, Enter = confirm, Esc = create nothing"
+    )
+    for choice in "${lang_choices[@]:-}"; do
+      case "$choice" in
+        prettier*) wants_prettier=true ;;
+        python*) wants_python=true ;;
+        lua*) wants_lua=true ;;
+      esac
+    done
+    if [ "${#lang_choices[@]}" -eq 0 ]; then
+      echo "No languages selected — nothing created."
+    fi
+  fi
+fi
+
+if $wants_prettier && [ ! -f .prettierrc ]; then
+  cat >.prettierrc <<'EOF'
+{
+  "printWidth": 120,
+  "tabWidth": 2,
+  "singleQuote": false,
+  "semi": true,
+  "trailingComma": "all",
+  "proseWrap": "preserve"
+}
+EOF
+  echo "✓ .prettierrc"
+elif ! $wants_prettier; then
+  echo "- Skipped .prettierrc (no matching files found)"
+fi
+
+if $wants_python; then
+  if [ ! -f pyproject.toml ]; then
+    cat >pyproject.toml <<'EOF'
+[tool.black]
+line-length = 120
+
+[tool.isort]
+profile = "black"
+line_length = 120
+EOF
+    echo "✓ pyproject.toml"
+  else
+    echo "! pyproject.toml already exists — add [tool.black]/[tool.isort] manually if missing"
+  fi
+else
+  echo "- Skipped pyproject.toml (no .py files found)"
+fi
+
+if $wants_lua && [ ! -f stylua.toml ]; then
+  cat >stylua.toml <<'EOF'
+column_width = 120
+indent_type = "Spaces"
+indent_width = 2
+quote_style = "AutoPreferDouble"
+EOF
+  echo "✓ stylua.toml"
+elif ! $wants_lua; then
+  echo "- Skipped stylua.toml (no .lua files found)"
+fi
+
+# Project-local skills via fzf (formatting is linked globally, excluded here).
+if $SKIP_SKILLS; then
+  echo "Skill selection skipped (--no-skills)."
+elif [ ! -t 0 ] || [ ! -t 1 ]; then
+  echo "! No interactive terminal detected — skill selection skipped."
+  echo "  (fzf needs a real TTY; for agents use --no-skills, or set"
+  echo "  SKILLS=\"skill-a,skill-b\" before running this script)"
+  if [ -n "${SKILLS:-}" ]; then
+    mkdir -p "$TARGET_DIR"
+    IFS=',' read -ra preselected <<<"$SKILLS"
+    for skill in "${preselected[@]}"; do
+      if [ -d "$SKILLS_REPO_DIR/$skill" ]; then
+        ln -sf "$SKILLS_REPO_DIR/$skill" "$TARGET_DIR/$skill"
+        echo "✓ Linked skill (from \$SKILLS): $skill"
+      else
+        echo "! Skill not found, skipped: $skill"
+      fi
+    done
+  fi
+elif [ -d "$SKILLS_REPO_DIR" ]; then
+  # Recursively finds every SKILL.md (submodules bundle multiple skills, so none exists at their own root).
+  # Label = path relative to SKILLS_REPO_DIR.
+  declare -A skill_dir_by_label=()
+  declare -A parent_count=()
+
+  while IFS= read -r -d '' skill_md; do
+    dir=$(dirname "$skill_md")
+    name=$(basename "$dir")
+    is_global "$name" && continue
+    rel=$(realpath --relative-to="$SKILLS_REPO_DIR" "$dir")
+    is_blacklisted "$rel" && continue
+    skill_dir_by_label["$rel"]="$dir"
+    parent=$(dirname "$dir")
+    parent_count["$parent"]=$((${parent_count["$parent"]:-0} + 1))
+  done < <(find "$SKILLS_REPO_DIR" -path "*/.git" -prune -o -type f -name "SKILL.md" -print0)
+
+  # 2+ skills sharing a parent also get offered as one whole-folder entry
+  declare -A category_dir_by_label=()
+  for parent in "${!parent_count[@]}"; do
+    count="${parent_count[$parent]}"
+    if [ "$count" -ge 2 ] && [ "$parent" != "$SKILLS_REPO_DIR" ]; then
+      rel=$(realpath --relative-to="$SKILLS_REPO_DIR" "$parent")
+      display=$(strip_boilerplate_segments "$rel")
+      category_dir_by_label["$display  [whole folder, $count skills]"]="$parent"
+    fi
+  done
+
+  declare -A all_entries=()
+  for label in "${!skill_dir_by_label[@]}"; do
+    dir="${skill_dir_by_label[$label]}"
+    parent=$(dirname "$dir")
+    # Skip individual skills that belong to a category folder
+    if ! $SHOW_ALL && [ "${parent_count[$parent]:-0}" -ge 2 ] && [ "$parent" != "$SKILLS_REPO_DIR" ]; then
+      continue
+    fi
+    display=$(strip_boilerplate_segments "$label")
+    if [ -n "${all_entries[$display]:-}" ] && [ "${all_entries[$display]}" != "$dir" ]; then
+      # Stripping caused a collision with a different skill
+      display="$label"
+    fi
+    all_entries["$display"]="$dir"
+  done
+  for label in "${!category_dir_by_label[@]}"; do
+    all_entries["$label"]="${category_dir_by_label[$label]}"
+  done
+
+  if [ "${#all_entries[@]}" -gt 0 ]; then
+    mapfile -t selected < <(
+      printf '%s\n' "${!all_entries[@]}" | sort |
+        fzf --multi \
+          --bind 'tab:toggle+down,shift-tab:toggle+up' \
+          --prompt="Select skills for this project> " \
+          --header=$'Tab = toggle · Enter = confirm\n[whole folder] = link entire category · rerun with --all for individual skills'
+    )
+
+    if [ "${#selected[@]}" -gt 0 ]; then
+      mkdir -p "$TARGET_DIR"
+      for label in "${selected[@]}"; do
+        dir="${all_entries[$label]}"
+        link_name=$(basename "$dir")
+        target="$TARGET_DIR/$link_name"
+        # If two selections resolve to the same bare folder name, fall back to a flattened, unambiguous link name.
+        if [ -e "$target" ] && [ "$(readlink -f "$target" 2>/dev/null)" != "$(readlink -f "$dir")" ]; then
+          rel_flat=$(realpath --relative-to="$SKILLS_REPO_DIR" "$dir")
+          link_name="${rel_flat//\//-}"
+          target="$TARGET_DIR/$link_name"
+        fi
+        ln -sf "$dir" "$target"
+        echo "✓ Linked: $label"
+      done
+    else
+      echo "No skills selected."
+    fi
+  else
+    echo "No project-local skills available (only global ones, or none contain a SKILL.md)."
+  fi
+else
+  echo "! $SKILLS_REPO_DIR not found — skipping skills"
+fi
+
+echo "Done."
