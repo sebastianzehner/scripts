@@ -9,7 +9,10 @@ fi
 for file in "$@"; do
   if [ -f "$file" ]; then
     tmp_file=$(mktemp)
-    prettier --parser markdown "$file" | mdslw --max-width 120 --lang "de en ac" > "$tmp_file"
+
+    abs_path=$(realpath "$file")
+
+    prettier --parser markdown "$file" | mdslw --stdin-filepath "$abs_path" >"$tmp_file"
     mv "$tmp_file" "$file"
     echo "Formatted: $file"
   else
