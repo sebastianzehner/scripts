@@ -1,0 +1,18 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+if [ "$#" -eq 0 ]; then
+  echo "Usage: md-format <file.md> [file2.md ...]"
+  exit 1
+fi
+
+for file in "$@"; do
+  if [ -f "$file" ]; then
+    tmp_file=$(mktemp)
+    prettier --parser markdown "$file" | mdslw --max-width 120 --lang "de en ac" > "$tmp_file"
+    mv "$tmp_file" "$file"
+    echo "Formatted: $file"
+  else
+    echo "Warning: File not found: $file" >&2
+  fi
+done
