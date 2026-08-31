@@ -101,9 +101,12 @@ wants_python=false
 wants_lua=false
 [ -n "$(has_file_matching '*.lua')" ] && wants_lua=true
 
+wants_markdown=false
+[ -n "$(has_file_matching '*.md' '*.mdx')" ] && wants_markdown=true
+
 # Nothing recognized:
 # Ask (interactive) which languages to scaffold for, or just report it and create nothing.
-if ! $wants_prettier && ! $wants_python && ! $wants_lua; then
+if ! $wants_prettier && ! $wants_python && ! $wants_lua && ! $wants_markdown; then
   if $SKIP_SKILLS || [ ! -t 0 ] || [ ! -t 1 ]; then
     echo "No recognized language files found (JS/TS/web, Python, or Lua)."
     echo "Nothing was created. Run 'project-setup' again once language files exist,"
@@ -113,6 +116,7 @@ if ! $wants_prettier && ! $wants_python && ! $wants_lua; then
       printf '%s\n' \
         "prettier (JS/TS/CSS/HTML/JSON/YAML/GraphQL/Liquid/Markdown)" \
         "python (black + isort)" \
+        "markdown (mdslw + markdownlint)" \
         "lua (stylua)" |
         fzf --multi \
           --bind 'tab:toggle+down,shift-tab:toggle+up' \
@@ -124,6 +128,7 @@ if ! $wants_prettier && ! $wants_python && ! $wants_lua; then
         prettier*) wants_prettier=true ;;
         python*) wants_python=true ;;
         lua*) wants_lua=true ;;
+        markdown*) wants_markdown=true ;;
       esac
     done
     if [ "${#lang_choices[@]}" -eq 0 ]; then
@@ -132,18 +137,14 @@ if ! $wants_prettier && ! $wants_python && ! $wants_lua; then
   fi
 fi
 
+PRETTIER_TEMPLATE="$HOME/.prettierrc"
 if $wants_prettier && [ ! -f .prettierrc ]; then
-  cat >.prettierrc <<'EOF'
-{
-  "printWidth": 120,
-  "tabWidth": 2,
-  "singleQuote": false,
-  "semi": true,
-  "trailingComma": "all",
-  "proseWrap": "preserve"
-}
-EOF
-  echo "✓ .prettierrc"
+  if [ -f "$PRETTIER_TEMPLATE" ]; then
+    cp "$PRETTIER_TEMPLATE" .prettierrc
+    echo "✓ .prettierrc (copied from $PRETTIER_TEMPLATE)"
+  else
+    echo "! .prettierrc not created — no template found at $PRETTIER_TEMPLATE"
+  fi
 elif ! $wants_prettier; then
   echo "- Skipped .prettierrc (no matching files found)"
 fi
@@ -176,6 +177,30 @@ EOF
   echo "✓ stylua.toml"
 elif ! $wants_lua; then
   echo "- Skipped stylua.toml (no .lua files found)"
+fi
+
+MDSLW_TEMPLATE="$HOME/.mdslw.toml"
+if $wants_markdown && [ ! -f .mdslw.toml ]; then
+  if [ -f "$MDSLW_TEMPLATE" ]; then
+    cp "$MDSLW_TEMPLATE" .mdslw.toml
+    echo "✓ .mdslw.toml (copied from $MDSLW_TEMPLATE)"
+  else
+    echo "! .mdslw.toml not created — no template found at $MDSLW_TEMPLATE"
+  fi
+elif ! $wants_markdown; then
+  echo "- Skipped .mdslw.toml (no .md/.mdx files found)"
+fi
+
+MARKDOWNLINT_TEMPLATE="$HOME/.markdownlint.jsonc"
+if $wants_markdown && [ ! -f .markdownlint.jsonc ]; then
+  if [ -f "$MARKDOWNLINT_TEMPLATE" ]; then
+    cp "$MARKDOWNLINT_TEMPLATE" .markdownlint.jsonc
+    echo "✓ .markdownlint.jsonc (copied from $MARKDOWNLINT_TEMPLATE)"
+  else
+    echo "! .markdownlint.jsonc not created — no template found at $MARKDOWNLINT_TEMPLATE"
+  fi
+elif ! $wants_markdown; then
+  echo "- Skipped .markdownlint.jsonc (no .md/.mdx files found)"
 fi
 
 # Project-local skills via fzf (formatting is linked globally, excluded here).
