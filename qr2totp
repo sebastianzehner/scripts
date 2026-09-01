@@ -1,0 +1,75 @@
+#!/usr/bin/env bash
+#
+# Version: 1.1.0
+#
+# Reads a TOTP secret from a QR code and puts only the
+# secret on the clipboard. Never touches disk.
+#
+# Requirements (X11 / dwm): maim, zbar (zbarimg), xclip
+#   sudo pacman -S maim zbar xclip
+#
+# Usage: qr2totp
+# Then drag the usual selection rectangle over the QR code.
+
+set -euo pipefail
+CLIP_TIMEOUT=15
+APP_NAME="qr2totp"
+ICON="$HOME/scripts/icons/qrcode-scan.svg"
+
+notify() {
+  notify-send -a "$APP_NAME" -u "${3:-low}" -i "$ICON" -h string:x-dunst-stack-tag:comfy "$1" "$2" 2>/dev/null
+}
+
+clear_clip() {
+  printf '' | xclip -selection clipboard 2>/dev/null || true
+}
+
+# deps
+missing=()
+for dep in maim zbarimg xclip grep; do
+  command -v "$dep" >/dev/null 2>&1 || missing+=("$dep")
+done
+
+if ! command -v notify-send >/dev/null 2>&1; then
+  echo "Missing dependency: notify-send (package: libnotify)" >&2
+  missing+=("notify-send")
+fi
+
+if ((${#missing[@]} > 0)); then
+  msg="Missing: ${missing[*]}"
+  echo "$msg" >&2
+  command -v notify-send >/dev/null 2>&1 && notify "$APP_NAME" "$msg" "critical"
+  exit 1
+fi
+
+otpauth_uri="$(maim -s | zbarimg --raw --quiet -)" || otpauth_uri=""
+
+if [[ -z "$otpauth_uri" ]]; then
+  notify "$APP_NAME" "No QR code detected." "critical"
+  exit 1
+fi
+
+secret="$(grep -oP '(?<=secret=)[^&]+' <<<"$otpauth_uri" || true)"
+
+if [[ -z "$secret" ]]; then
+  notify "$APP_NAME" "No 'secret=' parameter found in the QR code data." "critical"
+  exit 1
+fi
+
+printf '%s' "$secret" | xclip -selection clipboard
+unset secret otpauth_uri
+
+# safety net for early exit/interrupt
+trap clear_clip EXIT INT TERM
+
+printf -v msg 'Copied to clipboard for %ss.\nPaste into KeePassXC now.' "$CLIP_TIMEOUT"
+notify "$APP_NAME" "$msg" "normal"
+
+setsid -f bash -c "
+    sleep '$CLIP_TIMEOUT'
+    printf '' | xclip -selection clipboard
+    notify-send -a '$APP_NAME' -u low -i '$ICON' -h string:x-dunst-stack-tag:comfy '$APP_NAME' 'Clipboard cleared.' 2>/dev/null
+" >/dev/null 2>&1
+
+# normal exit: let the background timer above do the clearing
+trap - EXIT
