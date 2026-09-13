@@ -15,7 +15,20 @@
 
 # Define the default audio sink used by wpctl.
 # This allows PipeWire to dynamically resolve the currently active output device.
-SINK="@DEFAULT_AUDIO_SINK@"
+get_bridge_sink_id() {
+  wpctl status | awk '
+    /Sinks:/  { f=1; next }
+    /[├└]─/   { f=0 }
+    f
+  ' | grep "BRIDGE CAST V2 0" | grep -oE '[0-9]+' | head -n1
+}
+
+BRIDGE_ID="$(get_bridge_sink_id)"
+if [ -n "$BRIDGE_ID" ]; then
+  SINK="$BRIDGE_ID"
+else
+  SINK="@DEFAULT_AUDIO_SINK@"
+fi
 
 # Define the directory where volume icons are stored
 ICON_PATH="$HOME/scripts/icons"
