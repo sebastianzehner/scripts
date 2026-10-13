@@ -1,4 +1,11 @@
 #!/usr/bin/env bash
 
-# start slock with timestamped message
-slock -m "$(printf "%s\n Locked at %s" "$(figlet 'Lock Screen')" "$(date "+%a %d, %H:%M:%S")")"
+# Lock the screen: hyprlock on Wayland (Hyprland), slock on X11 (dwm).
+# Used by xautolock (X11), hypridle (Wayland) and the powermenu.
+if [ -n "${WAYLAND_DISPLAY:-}" ]; then
+  # Do not start a second lock screen if one is already running
+  pidof hyprlock >/dev/null 2>&1 || exec hyprlock
+else
+  # start slock with timestamped message
+  slock -m "$(printf "%s\n Locked at %s" "$(figlet 'Lock Screen')" "$(date "+%a %d, %H:%M:%S")")"
+fi
