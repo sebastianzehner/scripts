@@ -8,7 +8,7 @@
 
 set -euf
 
-if [ -n "${DISPLAY-}" ] && [ -z "${FIFO_UEBERZUG-}" ]; then
+if [ -n "${DISPLAY-}" ] && [ -z "${WAYLAND_DISPLAY-}" ] && [ -z "${KITTY_WINDOW_ID-}" ] && [ -z "${FIFO_UEBERZUG-}" ]; then
   export FIFO_UEBERZUG="${TMPDIR:-/tmp}/lf-ueberzug-$$"
 
   cleanup() {
