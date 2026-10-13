@@ -1,0 +1,43 @@
+#!/bin/sh
+# sigdwmblocks wrapper
+#
+# Signals the real (compiled) dwmblocks of the X11 session and also tells the
+# Quickshell bar of the Hyprland session to refresh the matching block. Scripts keep
+# calling `sigdwmblocks N` unchanged.
+#
+# Installed as ~/scripts/sigdwmblocks (chmod +x) in $PATH.
+# Check with:  type -a sigdwmblocks   (this wrapper must be listed first)
+
+# 1) Forward to the real sigdwmblocks: the first one in $PATH that is not this script
+self=$(readlink -f "$0")
+real=
+old_ifs=$IFS
+IFS=:
+for dir in $PATH; do
+  cand="${dir:-.}/sigdwmblocks"
+  if [ -x "$cand" ] && [ "$(readlink -f "$cand")" != "$self" ]; then
+    real=$cand
+    break
+  fi
+done
+IFS=$old_ifs
+[ -n "$real" ] && "$real" "$@" >/dev/null 2>&1
+
+# 2) Tell Quickshell. Signal numbers are the ones from dwmblocks blocks.h:
+#    1 calendar, 2 volume, 3 volume_bridge, 4 cpu_temp, 5 power, 6 record, 7 music, 8 gpu
+case "$1" in
+  1) block=calendar ;;
+  2) block=volume ;;
+  3) block=volume_bridge ;;
+  4) block=cpu_temp ;;
+  5) block=power ;;
+  6) block=record ;;
+  7) block=music ;;
+  8) block=gpu ;;
+  *) exit 0 ;;
+esac
+
+# The IPC socket lives in XDG_RUNTIME_DIR, so this also works when called from the X11
+# session. Without a running Quickshell this fails silently.
+command -v qs >/dev/null 2>&1 && qs ipc call "block_$block" refresh >/dev/null 2>&1
+exit 0
