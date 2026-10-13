@@ -1,10 +1,19 @@
 #!/usr/bin/env bash
-# Screenshot utility using import, xdotool, dmenu, and notify-send.
+# Screenshot utility with a dmenu interface. The backend is chosen by $WAYLAND_DISPLAY:
+#   X11 (dwm):           import, xdotool, slop, magick, xsel
+#   Wayland (Hyprland):  grim, slurp, hyprctl, jq, hyprpicker
 # Usage: screenshot [full|window|area]
-# Run without arguments to use dmenu interface or 'Alt' + 'Shift' + '5' in dwm.
+# Run without arguments to use dmenu interface or 'Alt' + 'Shift' + '5'.
+
+WAYLAND=0
+[ -n "${WAYLAND_DISPLAY:-}" ] && WAYLAND=1
 
 # Check for required commands
-REQUIRED_CMDS=("import" "xdotool" "dmenu" "notify-send")
+if [ "$WAYLAND" -eq 1 ]; then
+  REQUIRED_CMDS=("grim" "slurp" "hyprctl" "jq" "fuzzel" "dmenu_compat" "notify-send")
+else
+  REQUIRED_CMDS=("import" "xdotool" "dmenu" "dmenu_compat" "notify-send")
+fi
 for cmd in "${REQUIRED_CMDS[@]}"; do
   if ! command -v "$cmd" >/dev/null 2>&1; then
     echo "Error: Required command '$cmd' not found in PATH." >&2
@@ -25,24 +34,49 @@ mkdir -p "$OUTDIR"
 TIMESTAMP=$(date '+%Y%m%d_%H%M%S')
 FILENAME="${OUTDIR}/${TIMESTAMP}.png"
 
+# Geometry "x,y WxH" of the active Hyprland window, empty if there is none
+wayland_active_window_geometry() {
+  hyprctl activewindow -j 2>/dev/null |
+    jq -r 'select(.address != null) | "\(.at[0]),\(.at[1]) \(.size[0])x\(.size[1])"'
+}
+
 # Take screenshot based on given mode
 take_screenshot() {
   case "$1" in
     full)
-      import -window root "$FILENAME" && send_notification
+      if [ "$WAYLAND" -eq 1 ]; then
+        grim "$FILENAME" && send_notification
+      else
+        import -window root "$FILENAME" && send_notification
+      fi
       ;;
     window)
-      # Get active window ID using xdotool
-      WIN_ID=$(xdotool getactivewindow 2>/dev/null)
-      if [ -n "$WIN_ID" ]; then
-        import -window "$WIN_ID" "$FILENAME" && send_notification
+      if [ "$WAYLAND" -eq 1 ]; then
+        GEOM=$(wayland_active_window_geometry)
+        if [ -n "$GEOM" ]; then
+          grim -g "$GEOM" "$FILENAME" && send_notification
+        else
+          notify-send "No active window detected"
+          exit 1
+        fi
       else
-        notify-send "No active window detected"
-        exit 1
+        # Get active window ID using xdotool
+        WIN_ID=$(xdotool getactivewindow 2>/dev/null)
+        if [ -n "$WIN_ID" ]; then
+          import -window "$WIN_ID" "$FILENAME" && send_notification
+        else
+          notify-send "No active window detected"
+          exit 1
+        fi
       fi
       ;;
     area)
-      import "$FILENAME" && send_notification
+      if [ "$WAYLAND" -eq 1 ]; then
+        GEOM=$(slurp) || exit 1
+        grim -g "$GEOM" "$FILENAME" && send_notification
+      else
+        import "$FILENAME" && send_notification
+      fi
       ;;
     help)
       echo "Usage: screenshot [full|window|area]"
@@ -55,6 +89,26 @@ take_screenshot() {
 }
 
 colorpicker() {
+  if [ "$WAYLAND" -eq 1 ]; then
+    # Dependencies: hyprpicker, wl-clipboard, magick (hyprpicker -a copies the color itself)
+    for cmd in hyprpicker magick; do
+      command -v "$cmd" >/dev/null 2>&1 || {
+        notify-send "Missing: $cmd"
+        return 1
+      }
+    done
+
+    HEX=$(hyprpicker -a) || return 1
+
+    # Small swatch of the picked color for the notification
+    TMP="$(mktemp --suffix=.png)"
+    trap '[[ -f "$TMP" ]] && rm -f "$TMP"' EXIT
+    magick -size 64x64 "xc:$HEX" "$TMP"
+
+    notify-send -i "$TMP" "Color picked: $HEX"
+    return
+  fi
+
   # Dependencies: magick, xsel, slop
   for cmd in magick xsel slop; do
     command -v "$cmd" >/dev/null 2>&1 || {
@@ -93,7 +147,7 @@ send_notification() {
 # Show dmenu if no argument is passed
 # Delay to allow dmenu to close before capturing
 if [ -z "$1" ]; then
-  CHOICE=$(printf " \nFull Screen\nSelect Area\nActive Window\n \nColor Picker\nQR Secret Key\n \nGoto  record" | dmenu -noi -c -bw 2 -l 9 -p "󰹑 screenshot" -i -nb "#11111b" -nf "#a6adc8" -sb "#1e1e2e" -sf "#cdd6f4")
+  CHOICE=$(printf " \nFull Screen\nSelect Area\nActive Window\n \nColor Picker\nQR Secret Key\n \nGoto  record" | dmenu_compat -noi -c -bw 2 -l 9 -p "󰹑 screenshot" -i -nb "#11111b" -nf "#a6adc8" -sb "#1e1e2e" -sf "#cdd6f4")
   case "$CHOICE" in
     "Full Screen") (sleep 0.3 && take_screenshot full) & ;;
     "Select Area") (sleep 0.3 && take_screenshot area) & ;;
