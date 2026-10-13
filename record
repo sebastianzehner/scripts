@@ -1,51 +1,72 @@
 #!/usr/bin/env bash
-# Screen recording utility using ffmpeg, amixer, dmenu, notify-send
+# Screen recording utility using a menu (dmenu_compat) and notify-send.
+# The backend is chosen by $WAYLAND_DISPLAY:
+#   X11 (dwm):           ffmpeg (x11grab), amixer, xdotool, xdpyinfo, slop, dmenu
+#   Wayland (Hyprland):  wf-recorder, slurp, hyprctl, jq, fuzzel (via dmenu_compat)
 # Usage: record [screen|area|window|stop|help]
 
+WAYLAND=0
+[ -n "${WAYLAND_DISPLAY:-}" ] && WAYLAND=1
+
 # --- Configuration ---
-AUDIO_SRC="default"  # Use 'pactl list sources' to find correct input
+AUDIO_SRC="default" # Use 'pactl list sources' to find correct input
 CODEC_AUD="aac"
 OVERSCAN=10 # used only in record_window
+
+# wf-recorder codec arguments (Wayland only), software x264 unless NVENC is available
+WF_VIDEO=(-c libx264 -p preset=ultrafast -p crf=23)
+
+# Same tags as the X11 path (bt709, full range) so both backends look identical.
+WF_COLOR=(
+  -F "scale=out_color_matrix=bt709:out_range=pc,format=yuv420p"
+  -p colorspace=bt709 -p color_primaries=bt709 -p color_trc=bt709 -p color_range=pc
+)
 
 # Auto-detect best codec and framerate
 _ENCODERS=$(ffmpeg -encoders 2>/dev/null)
 if echo "$_ENCODERS" | grep -q h264_nvenc; then
-    # NVIDIA GPU available
-    CODEC_VID="h264_nvenc -rc vbr -cq 18 -b:v 0"
-    FRAMERATE=60
+  # NVIDIA GPU available
+  CODEC_VID="h264_nvenc -rc vbr -cq 18 -b:v 0"
+  WF_VIDEO=(-c h264_nvenc -p rc=vbr -p cq=18 -p b=0)
+  FRAMERATE=60
 elif echo "$_ENCODERS" | grep -q h264_amf; then
-    # AMD GPU available
-    CODEC_VID="h264_amf -quality balanced -rc cqp -qp_i 18 -qp_p 18"
-    FRAMERATE=60
+  # AMD GPU available
+  CODEC_VID="h264_amf -quality balanced -rc cqp -qp_i 18 -qp_p 18"
+  FRAMERATE=60
 else
-    # CPU fallback (Raspberry Pi, etc.)
-    CODEC_VID="libx264 -preset ultrafast -crf 23"
-    FRAMERATE=30
+  # CPU fallback (Raspberry Pi, etc.)
+  CODEC_VID="libx264 -preset ultrafast -crf 23"
+  FRAMERATE=30
 fi
 unset _ENCODERS
 
 init_paths() {
-    # Load XDG user dirs for standard folders
-    USER_DIRS="${XDG_CONFIG_HOME:-$HOME/.config}/user-dirs.dirs"
-    [ -f "$USER_DIRS" ] && source "$USER_DIRS"
+  # Load XDG user dirs for standard folders
+  USER_DIRS="${XDG_CONFIG_HOME:-$HOME/.config}/user-dirs.dirs"
+  [ -f "$USER_DIRS" ] && source "$USER_DIRS"
 
-    # Define paths and filenames
-    XDG_CACHE_HOME="${XDG_CACHE_HOME:-$HOME/.cache}"
-    PID_FILE="$XDG_CACHE_HOME/screenrecord.pid"
-    STATE_FILE="$XDG_CACHE_HOME/screenrecord.state"
-    OUTDIR="${XDG_VIDEOS_DIR:-$HOME/Videos}/recordings"
-    mkdir -p "$OUTDIR"
-    FILENAME="${OUTDIR}/$(date +%F_%H-%M-%S).mkv"
+  # Define paths and filenames
+  XDG_CACHE_HOME="${XDG_CACHE_HOME:-$HOME/.cache}"
+  PID_FILE="$XDG_CACHE_HOME/screenrecord.pid"
+  STATE_FILE="$XDG_CACHE_HOME/screenrecord.state"
+  LOG_FILE="$XDG_CACHE_HOME/screenrecord.log"
+  OUTDIR="${XDG_VIDEOS_DIR:-$HOME/Videos}/recordings"
+  mkdir -p "$OUTDIR"
+  FILENAME="${OUTDIR}/$(date +%F_%H-%M-%S).mkv"
 }
 
 # Check required commands
-REQUIRED_CMDS=("ffmpeg" "amixer" "dmenu" "xdotool" "xdpyinfo" "slop" "notify-send")
+if [ "$WAYLAND" -eq 1 ]; then
+  REQUIRED_CMDS=("wf-recorder" "slurp" "jq" "hyprctl" "fuzzel" "dmenu_compat" "notify-send")
+else
+  REQUIRED_CMDS=("ffmpeg" "amixer" "dmenu" "dmenu_compat" "xdotool" "xdpyinfo" "slop" "notify-send")
+fi
 for cmd in "${REQUIRED_CMDS[@]}"; do
-    if ! command -v "$cmd" >/dev/null 2>&1; then
-        echo "Missing: $cmd" >&2
-        notify-send "Missing tool" "$cmd" || true
-        exit 1
-    fi
+  if ! command -v "$cmd" >/dev/null 2>&1; then
+    echo "Missing: $cmd" >&2
+    notify-send "Missing tool" "$cmd" || true
+    exit 1
+  fi
 done
 
 # Init paths
@@ -57,153 +78,215 @@ set -euo pipefail
 
 # Error messages
 err() {
-    echo "Error: $*" >&2
-    notify-send "Error: $*" || true
+  echo "Error: $*" >&2
+  notify-send "Error: $*" || true
 }
 
-# Update dwmblocks
+# Update dwmblocks / Quickshell block
 update_status() {
-    sigdwmblocks 6
+  sigdwmblocks 6
 }
 
 # Define cleanup early
 cleanup() {
-    rm -f "$PID_FILE" "$STATE_FILE"
-    update_status
+  rm -f "$PID_FILE" "$STATE_FILE"
+  update_status
 }
 
 # Function returns PID if recording is running, empty otherwise
 is_recording_running() {
-    if [ -f "$PID_FILE" ]; then
-        local pid
-        pid=$(cat "$PID_FILE")
-        if ps -p "$pid" > /dev/null 2>&1; then
-            echo "$pid"
-            return 0
-        fi
+  if [ -f "$PID_FILE" ]; then
+    local pid
+    pid=$(cat "$PID_FILE")
+    if ps -p "$pid" >/dev/null 2>&1; then
+      echo "$pid"
+      return 0
     fi
-    return 1
+  fi
+  return 1
 }
 
 # --- Record functions ---
 
 # Start full screen recording
 record_screen() {
-    local geo
-    geo="$(xdpyinfo | awk '/dimensions:/ {print $2}')"
-    start_ffmpeg "$geo" "$DISPLAY" "Recording started ($geo)"
+  if [ "$WAYLAND" -eq 1 ]; then
+    local out
+    out="$(hyprctl monitors -j | jq -r '.[] | select(.focused) | .name')"
+    start_wf "Recording started ($out)" -o "$out"
+    return
+  fi
+  local geo
+  geo="$(xdpyinfo | awk '/dimensions:/ {print $2}')"
+  start_ffmpeg "$geo" "$DISPLAY" "Recording started ($geo)"
 }
 
-# Start area recording (selection via slop)
+# Start area recording (selection via slurp on Wayland, slop on X11)
 record_area() {
-    read -r X Y W H <<< "$(slop -f "%x %y %w %h")" || { notify-send "Selection cancelled" || true; exit 1; }
+  if [ "$WAYLAND" -eq 1 ]; then
+    local sel pos size
+    sel="$(slurp)" || {
+      notify-send "Selection cancelled" || true
+      exit 1
+    }
+    read -r pos size <<<"$sel"
+    X="${pos%,*}"
+    Y="${pos#*,}"
+    W="${size%x*}"
+    H="${size#*x}"
     # Round down to even numbers (required by yuv420p)
     W=$((W - W % 2))
     H=$((H - H % 2))
-    local geo="${W}x${H}"
-    local input="$DISPLAY+$X,$Y"
-    start_ffmpeg "$geo" "$input" "Recording started ($geo)"
+    start_wf "Recording started (${W}x${H})" -g "$X,$Y ${W}x${H}"
+    return
+  fi
+  read -r X Y W H <<<"$(slop -f "%x %y %w %h")" || {
+    notify-send "Selection cancelled" || true
+    exit 1
+  }
+  # Round down to even numbers (required by yuv420p)
+  W=$((W - W % 2))
+  H=$((H - H % 2))
+  local geo="${W}x${H}"
+  local input="$DISPLAY+$X,$Y"
+  start_ffmpeg "$geo" "$input" "Recording started ($geo)"
 }
 
 # Start window recording (active window)
 record_window() {
-    WIN_ID=$(xdotool getactivewindow)
-    if ! xwininfo -id "$WIN_ID" >/dev/null 2>&1; then
-        notify-send "Failed to get window info" || true
-        exit 1
+  if [ "$WAYLAND" -eq 1 ]; then
+    local info
+    info="$(hyprctl activewindow -j | jq -r 'select(.address != null) | "\(.at[0]) \(.at[1]) \(.size[0]) \(.size[1])"')"
+    if [ -z "$info" ]; then
+      notify-send "Failed to get window info" || true
+      exit 1
     fi
-    eval "$(xwininfo -id "$WIN_ID" | awk '
+    read -r X Y WIDTH HEIGHT <<<"$info"
+    local w=$((WIDTH - OVERSCAN))
+    local h=$((HEIGHT - OVERSCAN))
+    # Round down to even numbers (required by yuv420p)
+    w=$((w - w % 2))
+    h=$((h - h % 2))
+    start_wf "Recording started (${w}x${h})" -g "$((X + OVERSCAN / 2)),$((Y + OVERSCAN / 2)) ${w}x${h}"
+    return
+  fi
+
+  WIN_ID=$(xdotool getactivewindow)
+  if ! xwininfo -id "$WIN_ID" >/dev/null 2>&1; then
+    notify-send "Failed to get window info" || true
+    exit 1
+  fi
+  eval "$(xwininfo -id "$WIN_ID" | awk '
         /Absolute upper-left X:/ { x=$4 }
         /Absolute upper-left Y:/ { y=$4 }
         /Width:/ { w=$2 }
         /Height:/ { h=$2 }
         END { printf("WIDTH=%s HEIGHT=%s X=%s Y=%s\n", w, h, x, y) }')"
 
-    local w=$((WIDTH - OVERSCAN))
-    local h=$((HEIGHT - OVERSCAN))
-    # Round down to even numbers (required by yuv420p)
-    w=$((w - w % 2))
-    h=$((h - h % 2))
+  local w=$((WIDTH - OVERSCAN))
+  local h=$((HEIGHT - OVERSCAN))
+  # Round down to even numbers (required by yuv420p)
+  w=$((w - w % 2))
+  h=$((h - h % 2))
 
-    local geo="${w}x${h}"
-    local input="$DISPLAY+$((X + OVERSCAN / 2)),$((Y + OVERSCAN / 2))"
-    start_ffmpeg "$geo" "$input" "Recording started ($geo)"
+  local geo="${w}x${h}"
+  local input="$DISPLAY+$((X + OVERSCAN / 2)),$((Y + OVERSCAN / 2))"
+  start_ffmpeg "$geo" "$input" "Recording started ($geo)"
 }
 
 # Save PID and state, wait for process to finish
 start_recording() {
-    local pid=$!
-    echo "$pid" > "$PID_FILE"
-    echo "recording" > "$STATE_FILE"
-    update_status
-    if [ -n "$pid" ]; then
-        wait "$pid" || true
-    fi
-    update_status
+  local pid=$!
+  echo "$pid" >"$PID_FILE"
+  echo "recording" >"$STATE_FILE"
+  update_status
+  if [ -n "$pid" ]; then
+    wait "$pid" || true
+  fi
+  update_status
 }
 
-# Start ffmpeg stream
+# Start ffmpeg stream (X11)
 start_ffmpeg() {
-    local geometry="$1"
-    ffmpeg -video_size "${geometry}" -framerate "$FRAMERATE" -f x11grab -i "$2" \
-           -f pulse -i "$AUDIO_SRC" \
-           -vf "format=yuv420p" \
-           -colorspace bt709 -color_primaries bt709 -color_trc bt709 -color_range pc \
-           -c:v $CODEC_VID -c:a "$CODEC_AUD" -b:a 256k "$FILENAME" &
-    notify-send -t 2000 "$3" "$(basename "$FILENAME")" || true
-    echo "$3 → $FILENAME"
-    start_recording
+  local geometry="$1"
+  ffmpeg -video_size "${geometry}" -framerate "$FRAMERATE" -f x11grab -i "$2" \
+    -f pulse -i "$AUDIO_SRC" \
+    -vf "format=yuv420p" \
+    -colorspace bt709 -color_primaries bt709 -color_trc bt709 -color_range pc \
+    -c:v $CODEC_VID -c:a "$CODEC_AUD" -b:a 256k "$FILENAME" &
+  notify-send -t 2000 "$3" "$(basename "$FILENAME")" || true
+  echo "$3 → $FILENAME"
+  start_recording
+}
+
+# Start wf-recorder (Wayland): $1 = message, the rest are wf-recorder geometry/output arguments
+start_wf() {
+  local message="$1"
+  shift
+  local audio_args=(--audio)
+  [ "$AUDIO_SRC" = "default" ] || audio_args=("--audio=$AUDIO_SRC")
+  wf-recorder "$@" -r "$FRAMERATE" -x yuv420p "${WF_VIDEO[@]}" "${WF_COLOR[@]}" \
+    "${audio_args[@]}" -C "$CODEC_AUD" -f "$FILENAME" >"$LOG_FILE" 2>&1 &
+  notify-send -t 2000 "$message" "$(basename "$FILENAME")" || true
+  echo "$message → $FILENAME"
+  start_recording
 }
 
 # --- Control functions ---
 
 # Stop recording
 record_stop() {
-    PID=$(is_recording_running)
-    if [ -n "$PID" ]; then
-        if kill "$PID"; then
-            notify-send "Recording stopped" "$(basename "$FILENAME")" || true
-            echo "Recording stopped → $FILENAME"
-            cleanup
-            exit 0
-        else
-            err "Failed to stop recording"
-            exit 1
-        fi
+  PID=$(is_recording_running)
+  if [ -n "$PID" ]; then
+    # wf-recorder finalizes the file on SIGINT, ffmpeg handles SIGTERM
+    local sig=TERM
+    [ "$WAYLAND" -eq 1 ] && sig=INT
+    if kill -"$sig" "$PID"; then
+      notify-send "Recording stopped" "$(basename "$FILENAME")" || true
+      echo "Recording stopped → $FILENAME"
+      cleanup
+      exit 0
     else
-        err "No recording in progress"
-        exit 1
+      err "Failed to stop recording"
+      exit 1
     fi
+  else
+    err "No recording in progress"
+    exit 1
+  fi
 }
 
 # --- Help ---
 
 # Help message
 show_help() {
-    echo "Usage: record [screen|area|window|stop|help]"
-    echo "No argument opens dmenu prompt"
-    exit 0
+  echo "Usage: record [screen|area|window|stop|help]"
+  echo "No argument opens the menu (dmenu on X11, fuzzel on Wayland)"
+  exit 0
 }
 
 # --- Main logic ---
 
-# If no argument, show dmenu prompt
+# If no argument, show the menu
 if [ -z "${1:-}" ]; then
-    CHOICE=$(printf " \nFull Screen\nSelect Area\nActive Window\n \nGoto 󰹑 screenshot" | dmenu -noi -c -bw 2 -l 6 -p " record" -i -nb "#11111b" -nf "#a6adc8" -sb "#1e1e2e" -sf "#cdd6f4")
-    case "$CHOICE" in
-        "Full Screen")        record_screen ;;
-        "Select Area")        record_area ;;
-        "Active Window")      record_window ;;
-        "Goto 󰹑 screenshot")  screenshot ;;
-        *)                    exit 0 ;;
-    esac
+  CHOICE=$(printf " \nFull Screen\nSelect Area\nActive Window\n \nGoto 󰹑 screenshot" | dmenu_compat -noi -c -bw 2 -l 6 -p " record" -i -nb "#11111b" -nf "#a6adc8" -sb "#1e1e2e" -sf "#cdd6f4")
+  case "$CHOICE" in
+    "Full Screen") record_screen ;;
+    "Select Area") record_area ;;
+    "Active Window") record_window ;;
+    "Goto 󰹑 screenshot") screenshot ;;
+    *) exit 0 ;;
+  esac
 else
-    case "${1:-}" in
-        screen)  record_screen ;;
-        area)    record_area ;;
-        window)  record_window ;;
-        stop)    record_stop ;;
-        help)    show_help ;;
-        *)       echo "Invalid option"; exit 1 ;;
-    esac
+  case "${1:-}" in
+    screen) record_screen ;;
+    area) record_area ;;
+    window) record_window ;;
+    stop) record_stop ;;
+    help) show_help ;;
+    *)
+      echo "Invalid option"
+      exit 1
+      ;;
+  esac
 fi
