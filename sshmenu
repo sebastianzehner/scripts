@@ -49,7 +49,7 @@ if [ -z "$hosts" ]; then
 fi
 
 # Show selection menu with dmenu
-choice=$(echo "$hosts" | dmenu -noi -c -bw 2 -l 15 -p "SSH to:" -i -nb "#11111b" -nf "#a6adc8" -sb "#1e1e2e" -sf "#cdd6f4")
+choice=$(echo "$hosts" | dmenu_compat -noi -c -bw 2 -l 15 -p "SSH to:" -i -nb "#11111b" -nf "#a6adc8" -sb "#1e1e2e" -sf "#cdd6f4")
 
 # If a selection was made, start the SSH connection
 if [ -n "$choice" ]; then
