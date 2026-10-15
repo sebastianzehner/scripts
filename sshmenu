@@ -19,9 +19,12 @@
 #     User root
 #     Port 2222
 #     IdentityFile ~/.ssh/id_rsa_special
+#
+# Hosts from files in ~/.ssh/config.d/*.conf are included as well
 
 # Path to SSH config
-ssh_config="$HOME/.ssh/config"
+ssh_dir="$HOME/.ssh"
+ssh_config="$ssh_dir/config"
 
 # Check if SSH config exists
 if [ ! -f "$ssh_config" ]; then
@@ -29,8 +32,15 @@ if [ ! -f "$ssh_config" ]; then
     exit 1
 fi
 
-# Extract all Host entries from SSH config (excluding wildcards)
-hosts=$(grep "^Host " "$ssh_config" | awk '{print $2}' | grep -v '\*' | sort -u)
+# Read the main config plus all files from config.d
+config_files=("$ssh_config" "$ssh_dir"/config.d/*.conf)
+
+# Extract all Host entries (excluding wildcards and negations)
+hosts=$(grep -hiE '^[[:space:]]*Host[[:space:]]+' "${config_files[@]}" 2>/dev/null |
+    sed -E 's/^[[:space:]]*[Hh][Oo][Ss][Tt][[:space:]]+//' |
+    tr -s ' \t' '\n' |
+    grep -vE '[*?!]' |
+    sort -u)
 
 # Check if any hosts were found
 if [ -z "$hosts" ]; then
