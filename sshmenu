@@ -28,8 +28,8 @@ ssh_config="$ssh_dir/config"
 
 # Check if SSH config exists
 if [ ! -f "$ssh_config" ]; then
-    echo "SSH config file not found: $ssh_config"
-    exit 1
+  echo "SSH config file not found: $ssh_config"
+  exit 1
 fi
 
 # Read the main config plus all files from config.d
@@ -37,15 +37,15 @@ config_files=("$ssh_config" "$ssh_dir"/config.d/*.conf)
 
 # Extract all Host entries (excluding wildcards and negations)
 hosts=$(grep -hiE '^[[:space:]]*Host[[:space:]]+' "${config_files[@]}" 2>/dev/null |
-    sed -E 's/^[[:space:]]*[Hh][Oo][Ss][Tt][[:space:]]+//' |
-    tr -s ' \t' '\n' |
-    grep -vE '[*?!]' |
-    sort -u)
+  sed -E 's/^[[:space:]]*[Hh][Oo][Ss][Tt][[:space:]]+//' |
+  tr -s ' \t' '\n' |
+  grep -vE '[*?!]' |
+  sort -u)
 
 # Check if any hosts were found
 if [ -z "$hosts" ]; then
-    echo "No hosts found in SSH config"
-    exit 1
+  echo "No hosts found in SSH config"
+  exit 1
 fi
 
 # Show selection menu with dmenu
@@ -53,5 +53,5 @@ choice=$(echo "$hosts" | dmenu -noi -c -bw 2 -l 15 -p "SSH to:" -i -nb "#11111b"
 
 # If a selection was made, start the SSH connection
 if [ -n "$choice" ]; then
-    exec ssh "$choice"
+  exec ssh "$choice"
 fi
