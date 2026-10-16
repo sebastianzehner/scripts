@@ -2,7 +2,7 @@
 
 function powermenu {
   options="Cancel\nLock\nQuit\nReboot\nPoweroff"
-  selected=$(echo -e $options | dmenu_compat -noi -c -bw 2 -l 5 -p " powermenu" -i -nb "#11111b" -nf "#a6adc8" -sb "#1e1e2e" -sf "#cdd6f4")
+  selected=$(echo -e $options | qmenu -noi -c -bw 2 -l 5 -p " powermenu" -i -nb "#11111b" -nf "#a6adc8" -sb "#1e1e2e" -sf "#cdd6f4")
 
   if [[ $selected = "Poweroff" ]]; then
     #doas /sbin/poweroff # alpine linux

@@ -1,18 +1,18 @@
 #!/usr/bin/env bash
-# Screenshot utility with a dmenu interface. The backend is chosen by $WAYLAND_DISPLAY:
+# Screenshot utility with a menu interface. The backend is chosen by $WAYLAND_DISPLAY:
 #   X11 (dwm):           import, xdotool, slop, magick, xsel
-#   Wayland (Hyprland):  grim, slurp, hyprctl, jq, hyprpicker
+#   Wayland (Hyprland):  grim, slurp, hyprctl, jq, hyprpicker, quickshell
 # Usage: screenshot [full|window|area]
-# Run without arguments to use dmenu interface or 'Alt' + 'Shift' + '5'.
+# Run without arguments to use menu interface or 'Alt' + 'Shift' + '5'.
 
 WAYLAND=0
 [ -n "${WAYLAND_DISPLAY:-}" ] && WAYLAND=1
 
 # Check for required commands
 if [ "$WAYLAND" -eq 1 ]; then
-  REQUIRED_CMDS=("grim" "slurp" "hyprctl" "jq" "fuzzel" "dmenu_compat" "notify-send")
+  REQUIRED_CMDS=("grim" "slurp" "hyprctl" "jq" "quickshell" "qmenu" "notify-send")
 else
-  REQUIRED_CMDS=("import" "xdotool" "dmenu" "dmenu_compat" "notify-send")
+  REQUIRED_CMDS=("import" "xdotool" "dmenu" "qmenu" "notify-send")
 fi
 for cmd in "${REQUIRED_CMDS[@]}"; do
   if ! command -v "$cmd" >/dev/null 2>&1; then
@@ -80,7 +80,7 @@ take_screenshot() {
       ;;
     help)
       echo "Usage: screenshot [full|window|area]"
-      echo "Or run without arguments to use dmenu interface."
+      echo "Or run without arguments to use menu interface."
       ;;
     *)
       echo "Invalid option" && exit 1
@@ -144,10 +144,10 @@ send_notification() {
   fi
 }
 
-# Show dmenu if no argument is passed
-# Delay to allow dmenu to close before capturing
+# Show the menu if no argument is passed
+# Delay to allow qmenu to close before capturing
 if [ -z "$1" ]; then
-  CHOICE=$(printf " \nFull Screen\nSelect Area\nActive Window\n \nColor Picker\nQR Secret Key\n \nGoto  record" | dmenu_compat -noi -c -bw 2 -l 9 -p "󰹑 screenshot" -i -nb "#11111b" -nf "#a6adc8" -sb "#1e1e2e" -sf "#cdd6f4")
+  CHOICE=$(printf " \nFull Screen\nSelect Area\nActive Window\n \nColor Picker\nQR Secret Key\n \nGoto  record" | qmenu -noi -c -bw 2 -l 9 -p "󰹑 screenshot" -i -nb "#11111b" -nf "#a6adc8" -sb "#1e1e2e" -sf "#cdd6f4")
   case "$CHOICE" in
     "Full Screen") (sleep 0.3 && take_screenshot full) & ;;
     "Select Area") (sleep 0.3 && take_screenshot area) & ;;

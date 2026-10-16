@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
-# Screen recording utility using a menu (dmenu_compat) and notify-send.
+# Screen recording utility using a menu (qmenu) and notify-send.
 # The backend is chosen by $WAYLAND_DISPLAY:
 #   X11 (dwm):           ffmpeg (x11grab), amixer, xdotool, xdpyinfo, slop, dmenu
-#   Wayland (Hyprland):  wf-recorder, slurp, hyprctl, jq, fuzzel (via dmenu_compat)
+#   Wayland (Hyprland):  wf-recorder, slurp, hyprctl, jq, quickshell (via qmenu)
 # Usage: record [screen|area|window|stop|help]
 
 WAYLAND=0
@@ -57,9 +57,9 @@ init_paths() {
 
 # Check required commands
 if [ "$WAYLAND" -eq 1 ]; then
-  REQUIRED_CMDS=("wf-recorder" "slurp" "jq" "hyprctl" "fuzzel" "dmenu_compat" "notify-send")
+  REQUIRED_CMDS=("wf-recorder" "slurp" "jq" "hyprctl" "qmenu" "notify-send" "quickshell")
 else
-  REQUIRED_CMDS=("ffmpeg" "amixer" "dmenu" "dmenu_compat" "xdotool" "xdpyinfo" "slop" "notify-send")
+  REQUIRED_CMDS=("ffmpeg" "amixer" "dmenu" "qmenu" "xdotool" "xdpyinfo" "slop" "notify-send")
 fi
 for cmd in "${REQUIRED_CMDS[@]}"; do
   if ! command -v "$cmd" >/dev/null 2>&1; then
@@ -261,7 +261,7 @@ record_stop() {
 # Help message
 show_help() {
   echo "Usage: record [screen|area|window|stop|help]"
-  echo "No argument opens the menu (dmenu on X11, fuzzel on Wayland)"
+  echo "No argument opens the menu (dmenu on X11, quickshell on Wayland)"
   exit 0
 }
 
@@ -269,7 +269,7 @@ show_help() {
 
 # If no argument, show the menu
 if [ -z "${1:-}" ]; then
-  CHOICE=$(printf " \nFull Screen\nSelect Area\nActive Window\n \nGoto 󰹑 screenshot" | dmenu_compat -noi -c -bw 2 -l 6 -p " record" -i -nb "#11111b" -nf "#a6adc8" -sb "#1e1e2e" -sf "#cdd6f4")
+  CHOICE=$(printf " \nFull Screen\nSelect Area\nActive Window\n \nGoto 󰹑 screenshot" | qmenu -noi -c -bw 2 -l 6 -p " record" -i -nb "#11111b" -nf "#a6adc8" -sb "#1e1e2e" -sf "#cdd6f4")
   case "$CHOICE" in
     "Full Screen") record_screen ;;
     "Select Area") record_area ;;

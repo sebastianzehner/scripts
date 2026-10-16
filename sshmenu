@@ -1,5 +1,5 @@
 #!/bin/bash
-# This script displays a list of SSH hosts from ~/.ssh/config in dmenu
+# This script displays a list of SSH hosts from ~/.ssh/config in dmenu or quickshell menu
 # and connects to the selected host.
 #
 # Example ~/.ssh/config format:
@@ -48,8 +48,8 @@ if [ -z "$hosts" ]; then
   exit 1
 fi
 
-# Show selection menu with dmenu
-choice=$(echo "$hosts" | dmenu_compat -noi -c -bw 2 -l 15 -p "SSH to:" -i -nb "#11111b" -nf "#a6adc8" -sb "#1e1e2e" -sf "#cdd6f4")
+# Show selection menu with qmenu
+choice=$(echo "$hosts" | qmenu -noi -c -bw 2 -l 15 -p "SSH to:" -i -nb "#11111b" -nf "#a6adc8" -sb "#1e1e2e" -sf "#cdd6f4")
 
 # If a selection was made, start the SSH connection
 if [ -n "$choice" ]; then
