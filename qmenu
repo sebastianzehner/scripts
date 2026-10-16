@@ -1,0 +1,67 @@
+#!/usr/bin/env bash
+# qmenu - menu for scripts, same flags as dmenu.
+#   X11:     runs dmenu with the arguments unchanged.
+#   Wayland: shows the Quickshell menu (Menu.qml) and prints the selection.
+#            Exits with 1 and a message on stderr if the menu is not reachable.
+# Install as ~/scripts/qmenu (must be in PATH).
+
+if [ -z "$WAYLAND_DISPLAY" ]; then
+  exec dmenu "$@"
+fi
+
+prompt="" lines=0 bw=0 font="" nb="" nf="" sb="" sf=""
+bottom=false center=false noi=false ic=false
+
+while [ $# -gt 0 ]; do
+  case "$1" in
+    -p) prompt="$2"; shift ;;
+    -l) lines="$2"; shift ;;
+    -bw) bw="$2"; shift ;;
+    -fn) font="$2"; shift ;;
+    -nb) nb="$2"; shift ;;
+    -nf) nf="$2"; shift ;;
+    -sb) sb="$2"; shift ;;
+    -sf) sf="$2"; shift ;;
+    -b) bottom=true ;;
+    -c) center=true ;;
+    -i) ic=true ;;
+    -noi) noi=true ;;
+  esac
+  shift
+done
+
+case "$lines" in '' | *[!0-9]*) lines=0 ;; esac
+case "$bw" in '' | *[!0-9]*) bw=0 ;; esac
+
+dir=$(mktemp -d "${XDG_RUNTIME_DIR:-/tmp}/qmenu.XXXXXX") || exit 1
+trap 'rm -rf "$dir"' EXIT
+
+cat >"$dir/in"
+mkfifo "$dir/out"
+
+jq -n --rawfile items "$dir/in" \
+  --arg prompt "$prompt" --argjson lines "$lines" --argjson bw "$bw" \
+  --argjson bottom "$bottom" --argjson center "$center" \
+  --argjson noi "$noi" --argjson ic "$ic" --arg font "$font" \
+  --arg nb "$nb" --arg nf "$nf" --arg sb "$sb" --arg sf "$sf" \
+  '{prompt: $prompt, lines: $lines, bw: $bw, bottom: $bottom, center: $center,
+    noi: $noi, ic: $ic, font: $font, nb: $nb, nf: $nf, sb: $sb, sf: $sf,
+    items: ($items | split("\n"))}' >"$dir/req.json" || exit 1
+
+reply=$(qs ipc call menu open "$dir" 2>/dev/null)
+if [ "$reply" != "ok" ]; then
+  if [ "$reply" = "busy" ]; then
+    echo "qmenu: another menu is already open" >&2
+  else
+    echo "qmenu: cannot reach Quickshell (is it running with Menu {} loaded?)" >&2
+  fi
+  exit 1
+fi
+
+{
+  IFS= read -r status
+  IFS= read -r selection
+} <"$dir/out"
+
+[ "$status" = 0 ] && printf '%s\n' "$selection"
+exit "${status:-1}"
