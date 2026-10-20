@@ -1,124 +1,821 @@
 #!/usr/bin/env bash
-#
-# camera - control the Sony A6300 camera streaming setup
-#
-# The A6300's HDMI output goes through an LGX2 capture device. The
-# LGX2 has no Linux driver, so a Windows VM (Tiny11) runs the device
-# driver plus ffmpeg to serve the capture as an RTMP stream. This
-# script relays that stream into a v4l2loopback virtual webcam device
-# (for Zoom/OBS etc.), and provides helpers for viewing, recording,
-# and controlling the VM.
-#
-set -euo pipefail
+# camera - AVerMedia GC551 on demand: live view, recording, playback, streaming.
+# lgx2d runs only while this script runs (an already running lgx2d is used and left alone).
+# Needs: gum ffmpeg ffplay ffprobe lsusb v4l2-ctl pactl mpv, and a built lgx2userspace.
+# Commands: camera [live|record|stream|menu|stop|state] (see --help)
+# Bar state: $XDG_RUNTIME_DIR/camera/state (pid, mode, since, file, fps)
+set -uo pipefail
 
-RTMP_URL="rtmp://127.0.0.1:1935/live"
-LOOPBACK_LABEL="Sony A6300"
-VIDEO_NR=98
-RECORD_DIR="$HOME/videos/a6300"
-COMPOSE_FILE="$HOME/docker-compose/windows/tiny11/docker-compose.yml"
+# --- Settings (override in ~/.config/lgx2/camera.conf)
+CONF="${XDG_CONFIG_HOME:-$HOME/.config}/lgx2/camera.conf"
+LGX2_BUILD="/mnt/sumpf/ai/projects/lgx2userspace/build"
+VIDEO_DEV="/dev/video99"
+REC_DIR="$HOME/videos/a6300"
+ENCODER="auto" # auto | nvenc | x264
+WIDTH=1920
+HEIGHT=1080
+FPS=""                        # empty = detect from the HDMI signal
+PLAYER="auto"                 # live view: auto (kitty in a kitty terminal, else mpv window) | kitty | mpv | ffplay
+AUDIO_DEFAULT="default"       # audio source of "camera record", empty = none
+TERMINAL="${TERMINAL:-kitty}" # for "Terminal menu" in camera menu
+# shellcheck disable=SC1090
+[ -r "$CONF" ] && . "$CONF"
 
-usage() {
-    echo "Usage: $0 {start|rdp|live|webcam|record|stop|status}"
-    echo "  start   - start the Tiny11 VM container"
-    echo "  rdp     - open an RDP session into the VM (to launch the camera stream there)"
-    echo "  live    - show the live camera image with mpv"
-    echo "  webcam  - set up the virtual webcam device from the RTMP stream (for Zoom etc.)"
-    echo "  record  - start recording the RTMP stream (Ctrl+C to stop)"
-    echo "  stop    - tear down the webcam relay/loopback device (VM keeps running)"
-    echo "  status  - show current state"
+# --- Constants
+VERSION="26.10.8" # YY.MM.PATCH
+USB_ID="07ca:0551"
+STATE_DIR="${XDG_RUNTIME_DIR:-/tmp}/camera"
+STATE_FILE="$STATE_DIR/state"
+LOG="${XDG_RUNTIME_DIR:-/tmp}/camera-lgx2d.log"
+
+# Catppuccin Mocha
+BASE="#1e1e2e"
+TEXT="#cdd6f4"
+SUBTEXT0="#a6adc8"
+OVERLAY0="#6c7086"
+MAUVE="#cba6f7"
+RED="#f38ba8"
+YELLOW="#f9e2af"
+GREEN="#a6e3a1"
+BLUE="#89b4fa"
+RST=$'\033[0m'
+
+# --- Runtime state
+HEADLESS=0    # 1: started with live|record|stream, no terminal
+HMODE=""      # live | record | stream (headless)
+DAEMON_PID="" # set only when this script started lgx2d
+LGX2D=""
+CAP_FPS=60
+ALT=0 # 1: alternate screen is active
+TTY_STATE=""
+TTY_PLAYER=0 # 1: the player draws in the terminal, runs in this session and reads the keys itself
+STOP=0
+FORCED=0 # 1: a job had to be killed
+AUDIO_SRC=""
+ENC_ARGS=()
+PLAYER_CMD=()
+
+# --- Basics
+notify() {
+  command -v notify-send >/dev/null && notify-send -a camera "$@"
+  return 0
+}
+
+state_get() { sed -n "s/^$1=//p" "$STATE_FILE" 2>/dev/null | head -n 1; }
+
+# Prints the pid if the state file belongs to a running camera script (guards against pid reuse)
+state_alive() {
+  local pid
+  pid="$(state_get pid)"
+  [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null && grep -qa camera "/proc/$pid/cmdline" 2>/dev/null && echo "$pid"
+}
+
+# qmenu menu for a launcher or key binding; the terminal menu is the default
+qmenu_menu() {
+  local self mode items lines choice
+  self="$(readlink -f "${BASH_SOURCE[0]}")"
+  command -v qmenu >/dev/null || {
+    notify "Camera" "qmenu is missing"
     exit 1
+  }
+  mode=""
+  if state_alive >/dev/null; then mode="$(state_get mode)"; fi
+  case "$mode" in
+    live | recording | streaming)
+      items=" \nStop $mode\n \nGoto 󰹑 screenshot"
+      lines=4
+      ;;
+    *)
+      items=" \nLive view\nRecord\nStreaming\n \nTerminal menu\n \nGoto 󰹑 screenshot"
+      lines=8
+      ;;
+  esac
+  choice="$(printf '%b' "$items" | qmenu -noi -c -bw 2 -l "$lines" -p "󰄀 camera" -i \
+    -nb "#11111b" -nf "#a6adc8" -sb "#1e1e2e" -sf "#cdd6f4")"
+  case "$choice" in
+    "Live view") exec "$self" live ;;
+    "Record") exec "$self" record ;;
+    "Streaming") exec "$self" stream ;;
+    "Stop "*) exec "$self" stop ;;
+    "Terminal menu") setsid -f "${TERMINAL:-kitty}" -e "$self" ;;
+    "Goto 󰹑 screenshot") exec screenshot ;;
+  esac
+  exit 0
 }
 
-wait_for_rtmp() {
-    echo "Waiting for RTMP stream from the VM (up to 60s)..."
-    for _ in $(seq 1 60); do
-        if ffprobe -v quiet "$RTMP_URL" -show_entries stream=codec_type \
-            -of csv=p=0 2>/dev/null | grep -q video; then
-            echo "Stream available."
-            return 0
-        fi
-        sleep 1
-    done
-    echo "Error: no stream found. Did you start the camera stream inside the VM (rdp + start-camera-stream.bat)?" >&2
+# --- screen / UI helpers
+# Alternate screen; echo off, otherwise terminal replies to gum's queries show up as stray text
+quiet_tty() {
+  if [ -t 0 ]; then
+    TTY_STATE="$(stty -g 2>/dev/null)"
+    stty -echo 2>/dev/null
+  fi
+}
+restore_tty() {
+  if [ -n "$TTY_STATE" ]; then stty "$TTY_STATE" 2>/dev/null; fi
+  TTY_STATE=""
+}
+drain_input() {
+  [ -t 0 ] || return 0
+  while read -rsn1 -t 0.01 _; do :; done
+}
+
+# 24-bit foreground colour
+fg() {
+  local h="${1#\#}"
+  printf '\033[38;2;%d;%d;%dm' "0x${h:0:2}" "0x${h:2:2}" "0x${h:4:2}"
+}
+
+# Window/tab name in tmux or kitty
+set_name() {
+  [ "$HEADLESS" = 1 ] && return 0
+  if [ -n "${TMUX:-}" ]; then
+    tmux rename-window -t "$TMUX_PANE" "$1"
+  elif [ -n "${KITTY_WINDOW_ID:-}" ]; then
+    printf '\033]1337;SetUserVar=tab_name=%s\007' "$(printf '%s' "$1" | base64 -w0)"
+  fi
+}
+
+reset_name() {
+  [ "$HEADLESS" = 1 ] && return 0
+  if [ -n "${TMUX:-}" ]; then
+    tmux set-option -w -t "$TMUX_PANE" automatic-rename on
+  elif [ -n "${KITTY_WINDOW_ID:-}" ]; then
+    printf '\033]1337;SetUserVar=tab_name=\007'
+  fi
+}
+
+enter_screen() {
+  quiet_tty
+  tput smcup 2>/dev/null && ALT=1
+}
+leave_screen() {
+  if [ "$ALT" = 1 ]; then tput rmcup 2>/dev/null; fi
+  ALT=0
+}
+
+die() {
+  leave_screen
+  if [ "$HEADLESS" = 1 ]; then
+    echo "$*"
+    notify "Camera" "$*"
+    exit 1
+  fi
+  gum style --foreground "$RED" "$*"
+  exit 1
+}
+info() { gum style --foreground "$SUBTEXT0" "$*"; }
+pause() {
+  [ "$HEADLESS" = 1 ] && return 0
+  gum style --foreground "$OVERLAY0" "Press Enter to continue"
+  read -r _
+}
+
+choose() { # $1 = header, items as further arguments or on stdin
+  local header="$1"
+  shift
+  drain_input
+  gum choose --header "$header" --header.foreground "$BLUE" \
+    --cursor "󰧞 " --cursor.foreground "$MAUVE" \
+    --selected.foreground "$MAUVE" --item.foreground "$TEXT" \
+    --no-show-help "$@"
+}
+
+confirm() {
+  drain_input
+  gum confirm --prompt.foreground "$TEXT" \
+    --selected.background "$MAUVE" --selected.foreground "$BASE" \
+    --unselected.foreground "$SUBTEXT0" --no-show-help "$1"
+}
+
+# --- state for the status bar
+notify_bar() {
+  command -v qs >/dev/null || return 0
+  setsid -f qs ipc call block_camera refresh >/dev/null 2>&1 </dev/null
+}
+
+set_state() { # $1 = idle | live | recording | streaming, $2 = file, $3 = fps
+  mkdir -p "$STATE_DIR" && chmod 700 "$STATE_DIR" 2>/dev/null
+  printf 'pid=%s\nmode=%s\nsince=%s\nfile=%s\nfps=%s\n' "$$" "$1" "$(date +%s)" "${2:-}" "${3:-}" >"$STATE_FILE.$$" &&
+    mv -f "$STATE_FILE.$$" "$STATE_FILE"
+  notify_bar
+}
+
+clear_state() {
+  if [ "$(state_get pid)" = "$$" ]; then
+    rm -f "$STATE_FILE"
+    notify_bar
+  fi
+}
+
+draw_banner() {
+  clear
+  gum style --border rounded --padding "0 2" --border-foreground "$BLUE" \
+    --foreground "$BLUE" --bold --align left --width 38 "Camera Menu - GC551 Capture Card"
+}
+
+# --- HDMI signal
+# Latest status line of our own lgx2d (unknown if it was started elsewhere)
+signal_line() {
+  [ -n "$DAEMON_PID" ] || return 0
+  grep "HDMI input" "$LOG" 2>/dev/null | tail -n 1
+}
+
+signal_text() {
+  local line
+  if [ -z "$DAEMON_PID" ]; then
+    echo "unknown (lgx2d was started elsewhere)"
+    return
+  fi
+  line="$(signal_line)"
+  if [ -z "$line" ]; then
+    echo "waiting for the first status from lgx2d ..."
+    return
+  fi
+  sed -E 's/^HDMI input( \(before streaming\))?: //; s/ \(status (poll|read) took [0-9]+ ms\)$//' <<<"$line"
+}
+
+signal_state() { # ok | none | hdcp | unknown
+  case "$(signal_text)" in
+    *" Hz"*) echo ok ;;
+    *"HDCP"*) echo hdcp ;;
+    *"no signal"* | *"no cable"*) echo none ;;
+    *) echo unknown ;;
+  esac
+}
+
+draw_header() {
+  local color
+  draw_banner
+  case "$(signal_state)" in
+    ok) color="$GREEN" ;;
+    none) color="$RED" ;;
+    hdcp) color="$YELLOW" ;;
+    *) color="$OVERLAY0" ;;
+  esac
+  printf '%s●%s %s%s%s\n\n' "$(fg "$color")" "$RST" "$(fg "$SUBTEXT0")" "$(signal_text)" "$RST"
+}
+
+# Asks on no cable / no signal / HDCP source
+continue_without_signal() {
+  local msg
+  case "$(signal_state)" in
+    none) msg="No HDMI signal reported." ;;
+    hdcp) msg="HDCP-protected source, it is not captured." ;;
+    *) return 0 ;;
+  esac
+  if [ "$HEADLESS" = 1 ]; then
+    notify "Camera" "$msg"
     return 1
+  fi
+  confirm "$msg Start anyway?"
 }
 
-cmd_start() {
-    echo "Starting Windows VM container..."
-    docker compose -f "$COMPOSE_FILE" up -d
-    echo "Done. Use '$0 rdp' to connect and start the camera stream inside the VM."
+# Frame rate: FPS from config, else the HDMI status line, else measured (a wrong rate duplicates frames)
+detect_fps() {
+  local hz n
+  if [ -n "$FPS" ]; then
+    CAP_FPS="$FPS"
+    return
+  fi
+  hz="$(signal_line | sed -n 's/.*@ \([0-9][0-9.]*\) Hz.*/\1/p')"
+  if [ -n "$hz" ]; then
+    CAP_FPS="$(awk -v h="$hz" 'BEGIN { printf "%d", h + 0.5 }')"
+    return
+  fi
+  # lgx2d started elsewhere: count frames for 3 s
+  n="$(ffmpeg -hide_banner -loglevel info -stats -f v4l2 -video_size "${WIDTH}x${HEIGHT}" -framerate 60 \
+    -use_wallclock_as_timestamps 1 -i "$VIDEO_DEV" -t 3 -fps_mode passthrough -f null - 2>&1 |
+    tr '\r' '\n' | sed -n 's/^frame= *\([0-9][0-9]*\).*/\1/p' | tail -n 1)"
+  if [ -n "$n" ] && [ "$n" -gt 0 ]; then
+    CAP_FPS="$(awk -v n="$n" 'BEGIN {
+      f = n / 3; best = 60; d = 1e9
+      split("24 25 30 50 60", c, " ")
+      for (i = 1; i <= 5; i++) { x = f - c[i]; if (x < 0) x = -x; if (x < d) { d = x; best = c[i] } }
+      print best }')"
+  else
+    CAP_FPS=60
+  fi
 }
 
-cmd_rdp() {
-    xfreerdp3 /v:127.0.0.1:3389 /u:$(whoami) /cert:ignore /dynamic-resolution /audio-mode:0
+# --- checks
+check_tools() {
+  command -v gum >/dev/null || {
+    echo "gum is missing (sudo pacman -S gum)" >&2
+    exit 1
+  }
+  local t missing=()
+  for t in ffmpeg ffplay ffprobe lsusb v4l2-ctl pactl; do
+    command -v "$t" >/dev/null || missing+=("$t")
+  done
+  if [ "$PLAYER" != ffplay ]; then command -v mpv >/dev/null || missing+=(mpv); fi
+  [ ${#missing[@]} -eq 0 ] || die "Missing: ${missing[*]}"
+
+  if command -v lgx2d >/dev/null; then
+    LGX2D="$(command -v lgx2d)"
+  elif [ -x "$LGX2_BUILD/src/lgx2d/lgx2d" ]; then
+    LGX2D="$LGX2_BUILD/src/lgx2d/lgx2d"
+  else
+    die "lgx2d not found. Set LGX2_BUILD in $CONF to the build directory."
+  fi
 }
 
-start_loopback() {
-    if lsmod | grep -q v4l2loopback; then
-        echo "v4l2loopback already loaded, reloading for a clean label..."
-        sudo modprobe -r v4l2loopback
+card_present() { lsusb -d "$USB_ID" >/dev/null 2>&1; }
+
+ensure_loopback() {
+  [ -e "$VIDEO_DEV" ] && return 0
+  confirm "$VIDEO_DEV does not exist. Load v4l2loopback now (sudo)?" || die "Cannot continue without $VIDEO_DEV."
+  local nr="${VIDEO_DEV##*video}"
+  sudo modprobe v4l2loopback video_nr="$nr" exclusive_caps=1 card_label="LGX2" || die "modprobe failed."
+  [ -e "$VIDEO_DEV" ] || die "$VIDEO_DEV was not created. If v4l2loopback was already loaded, run: sudo v4l2loopback-ctl add -n LGX2 -x 1 $VIDEO_DEV"
+}
+
+# --- lgx2d
+cleanup() {
+  leave_screen
+  restore_tty
+  reset_name
+  clear_state
+  if [ -n "$DAEMON_PID" ] && kill -0 "$DAEMON_PID" 2>/dev/null; then
+    kill -INT "$DAEMON_PID" 2>/dev/null
+    for _ in $(seq 1 50); do
+      kill -0 "$DAEMON_PID" 2>/dev/null || break
+      sleep 0.1
+    done
+    kill -TERM "$DAEMON_PID" 2>/dev/null
+    wait "$DAEMON_PID" 2>/dev/null
+  fi
+}
+
+start_daemon() {
+  if pgrep -x lgx2d >/dev/null; then
+    return 0 # started elsewhere: use it, leave it running
+  fi
+  : >"$LOG"
+  # stdbuf: otherwise the log arrives late
+  stdbuf -oL -eL "$LGX2D" -d "$VIDEO_DEV" >"$LOG" 2>&1 &
+  DAEMON_PID=$!
+  # shellcheck disable=SC2016 # expanded by the inner bash, not here
+  local wait_cmd='for _ in $(seq 1 150); do grep -q "HDMI input" "$1" && exit 0; kill -0 "$2" 2>/dev/null || exit 2; sleep 0.2; done; exit 1'
+  if [ "$HEADLESS" = 1 ]; then
+    bash -c "$wait_cmd" _ "$LOG" "$DAEMON_PID" || die "No status from lgx2d, see $LOG"
+  elif ! gum spin --spinner dot --spinner.foreground "$MAUVE" --title.foreground "$SUBTEXT0" \
+    --title "Starting the card ..." -- bash -c "$wait_cmd" _ "$LOG" "$DAEMON_PID"; then
+    gum style --foreground "$YELLOW" "No status from lgx2d yet. Log:"
+    tail -n 15 "$LOG"
+    pause
+  fi
+}
+
+# --- audio / encoder
+pick_audio() {
+  local sources
+  sources="$({
+    pactl list short sources | awk '{print $2}' | grep -v '\.monitor$' | grep -i lgx2
+    pactl list short sources | awk '{print $2}' | grep -v '\.monitor$' | grep -vi lgx2
+  })"
+  AUDIO_SRC="$({
+    echo "No audio"
+    # not [ ] &&: pipefail would fail the selection
+    if [ -n "$sources" ]; then echo "$sources"; fi
+  } | choose "Audio source for the recording")" || return 1
+  [ "$AUDIO_SRC" = "No audio" ] && AUDIO_SRC=""
+  return 0
+}
+
+video_encoder_args() {
+  local enc="$ENCODER"
+  if [ "$enc" = "auto" ]; then
+    if ffmpeg -hide_banner -loglevel error -f lavfi -i nullsrc=s=256x256 -frames:v 1 -c:v h264_nvenc -f null - 2>/dev/null; then
+      enc="nvenc"
+    else
+      enc="x264"
     fi
-    sudo modprobe v4l2loopback video_nr="$VIDEO_NR" card_label="$LOOPBACK_LABEL" exclusive_caps=1
+  fi
+  if [ "$enc" = "nvenc" ]; then
+    ENC_ARGS=(-c:v h264_nvenc -preset p5 -cq 21 -b:v 0 -pix_fmt yuv420p)
+  else
+    ENC_ARGS=(-c:v libx264 -preset veryfast -crf 18 -pix_fmt yuv420p)
+  fi
+  info "Encoder: $enc"
 }
 
-start_relay() {
-    if pgrep -f "video${VIDEO_NR}" >/dev/null; then
-        echo "Relay already running."
-        return
+# --- actions
+# One reader per /dev/videoNN: the record preview comes from the recording ffmpeg
+
+# Live view player; kitty (mpv in the terminal) needs kitty without tmux and no headless mode
+effective_player() {
+  case "$PLAYER" in
+    ffplay) echo ffplay ;;
+    mpv) echo mpv ;;
+    *)
+      if [ "$HEADLESS" = 0 ] && [ -n "${KITTY_WINDOW_ID:-}" ] && [ -z "${TMUX:-}" ]; then echo kitty; else echo mpv; fi
+      ;;
+  esac
+}
+
+live_player_cmd() { # sets PLAYER_CMD
+  local fmt="video_size=${WIDTH}x${HEIGHT},framerate=${CAP_FPS}"
+  case "$(effective_player)" in
+    ffplay)
+      PLAYER_CMD=(ffplay -loglevel warning -window_title "Camera Live View" -fflags nobuffer -flags low_delay -framedrop
+        -f video4linux2 -video_size "${WIDTH}x${HEIGHT}" -framerate "$CAP_FPS" -i "$VIDEO_DEV")
+      ;;
+    kitty)
+      PLAYER_CMD=(mpv "--profile=low-latency,sw-fast" --vo=kitty --really-quiet --osc=no --osd-level=0
+        --demuxer-lavf-o="$fmt" "av://v4l2:$VIDEO_DEV")
+      ;;
+    *)
+      PLAYER_CMD=(mpv --profile=low-latency --really-quiet --osc=no --osd-level=0 --title="Camera Live View"
+        --demuxer-lavf-o="$fmt" "av://v4l2:$VIDEO_DEV")
+      ;;
+  esac
+}
+
+live_view() {
+  continue_without_signal || return
+  detect_fps
+  info "Press q or Ctrl+C, or close the window, to stop the live view ($CAP_FPS fps)."
+  set_name camera-live
+  STOP=0
+  set_state live "" "$CAP_FPS"
+  live_player_cmd
+  if [ "$(effective_player)" = kitty ]; then
+    # on the terminal: mpv needs it for the picture size and the keys
+    TTY_PLAYER=1
+    "${PLAYER_CMD[@]}" <&0 &
+  else
+    # own session: Ctrl+C reaches only this script
+    setsid "${PLAYER_CMD[@]}" </dev/null &
+  fi
+  supervise $!
+  set_state idle
+  if [ "$TTY_PLAYER" = 1 ]; then reset_terminal; fi
+  TTY_PLAYER=0
+  set_name camera
+}
+
+# Stops a job once STOP=1 (Ctrl+C, q, camera stop, closed preview): INT, TERM after 5 s, KILL after 8 s.
+# $1 = pid of a setsid job (own session, pid = group id; with TTY_PLAYER=1 a plain pid), $2 = optional preview player pid.
+# Only builtins while waiting: sleep/pgrep would get Ctrl+C and end the loop early.
+alive() { # $1 = pid, $2 = 1: whole process group
+  if [ "$2" = 1 ]; then kill -0 -- "-$1" 2>/dev/null; else kill -0 "$1" 2>/dev/null; fi
+}
+sendsig() { # $1 = signal, $2 = pid, $3 = 1: whole process group
+  if [ "$3" = 1 ]; then kill "-$1" -- "-$2" 2>/dev/null; else kill "-$1" "$2" 2>/dev/null; fi
+}
+
+supervise() {
+  local pid="$1" player="${2:-}" player_seen=0 key t_int=0 waited tries=0 jg=1
+  FORCED=0
+  if [ "$TTY_PLAYER" = 1 ]; then jg=0; fi
+  # wait for the job's process group
+  while [ "$jg" = 1 ] && ! alive "$pid" 1 && alive "$pid" 0 && [ "$tries" -lt 50 ]; do
+    tries=$((tries + 1))
+    read -rt 0.1 <> <(:) 2>/dev/null || true
+  done
+  while alive "$pid" "$jg"; do
+    if [ -n "$player" ]; then
+      if alive "$player" 1; then
+        player_seen=1
+      elif [ "$player_seen" = 1 ]; then
+        STOP=1
+      fi
     fi
-    nohup ffmpeg -fflags nobuffer -flags low_delay -i "$RTMP_URL" \
-        -pix_fmt yuv420p -f v4l2 "/dev/video${VIDEO_NR}" \
-        > /tmp/a6300-relay.log 2>&1 &
-    disown
-    echo "Relay started (PID $!, log: /tmp/a6300-relay.log)."
+    if [ "$STOP" = 1 ]; then
+      if [ "$t_int" = 0 ]; then
+        t_int=$SECONDS
+        sendsig INT "$pid" "$jg"
+      fi
+      waited=$((SECONDS - t_int))
+      if [ "$waited" -ge 8 ]; then
+        FORCED=1
+        sendsig KILL "$pid" "$jg"
+      elif [ "$waited" -ge 5 ]; then
+        sendsig TERM "$pid" "$jg"
+      fi
+    fi
+    if [ -t 0 ] && [ "$TTY_PLAYER" = 0 ]; then
+      if read -rsn1 -t 0.2 key; then
+        case "$key" in q | Q) STOP=1 ;; esac
+      fi
+    else
+      read -rt 0.2 <> <(:) 2>/dev/null || true # pause without a process
+    fi
+  done
+  wait "$pid" 2>/dev/null
+  if [ "$FORCED" = 1 ]; then
+    gum style --foreground "$YELLOW" "The process did not stop by itself and was killed."
+  fi
 }
 
-cmd_webcam() {
-    wait_for_rtmp
-    start_loopback
-    start_relay
-    echo "Done. Camera selectable in Zoom/OBS as '$LOOPBACK_LABEL'."
+# A killed recording has no index or duration; a remux rebuilds both
+repair_recording() { # $1 = file
+  local fixed="${1%.mkv}_fixed.mkv"
+  info "Repairing the recording (rebuilding index and duration) ..."
+  if ffmpeg -nostdin -hide_banner -loglevel error -i "$1" -c copy "$fixed" </dev/null && [ -s "$fixed" ]; then
+    mv -f "$fixed" "$1"
+  else
+    rm -f "$fixed"
+    gum style --foreground "$YELLOW" "Repair failed, the original file was kept."
+  fi
 }
 
-cmd_live() {
-    wait_for_rtmp
-    mpv --profile=low-latency --demuxer-max-bytes=8MiB --audio-buffer=0.2 "$RTMP_URL"
+record() { # $1 = with-preview | no-preview
+  continue_without_signal || return
+  if [ "$HEADLESS" = 1 ]; then
+    AUDIO_SRC="$AUDIO_DEFAULT"
+    if [ "$AUDIO_SRC" = default ] && [ -z "$(pactl get-default-source 2>/dev/null)" ]; then AUDIO_SRC=""; fi
+  else
+    pick_audio || return
+  fi
+  detect_fps
+  video_encoder_args
+  mkdir -p "$REC_DIR"
+  local out
+  out="$REC_DIR/recording_$(date +%Y%m%d_%H%M%S).mkv"
+
+  local audio_in=() audio_out=()
+  if [ -n "$AUDIO_SRC" ]; then
+    audio_in=(-thread_queue_size 1024 -f pulse -i "$AUDIO_SRC")
+    audio_out=(-c:a aac -b:a 192k)
+  fi
+
+  set_name camera-rec
+  gum style --foreground "$MAUVE" "Recording: $out ($CAP_FPS fps)"
+  info "Press q or Ctrl+C to stop the recording."
+  STOP=0
+
+  local fifo="" player_pid=""
+  local preview=0
+  if [ "$1" = "with-preview" ]; then
+    fifo="${XDG_RUNTIME_DIR:-/tmp}/camera-preview-$$.nut"
+    rm -f "$fifo"
+    mkfifo "$fifo"
+    # ffplay: mpv adds too much delay for the preview
+    setsid ffplay -loglevel quiet -window_title "Camera Recording" -fflags nobuffer -f nut -i "$fifo" </dev/null &
+    player_pid=$!
+    read -rt 0.5 <> <(:) 2>/dev/null || true
+    if kill -0 "$player_pid" 2>/dev/null; then
+      preview=1
+    else
+      # no reader: ffmpeg would block on the fifo
+      info "The preview window could not be started, recording without it."
+      rm -f "$fifo"
+      fifo=""
+      player_pid=""
+    fi
+  fi
+  if [ "$preview" = 1 ]; then
+    local map_a=()
+    [ -n "$AUDIO_SRC" ] && map_a=(-map 1:a)
+    # tee keeps reading when the preview closes (no broken pipe) and ignores Ctrl+C
+    # shellcheck disable=SC2016 # expanded by the inner bash, not here
+    FIFO="$fifo" setsid bash -c 'trap "" INT; ffmpeg "$@" | tee --output-error=warn "$FIFO" >/dev/null 2>&1' _ \
+      -y -nostdin -hide_banner -loglevel warning -stats \
+      -f v4l2 -use_wallclock_as_timestamps 1 -video_size "${WIDTH}x${HEIGHT}" -framerate "$CAP_FPS" -i "$VIDEO_DEV" \
+      "${audio_in[@]}" \
+      -filter_complex "[0:v]split=2[rec][pv];[pv]scale=960:-2,format=yuv420p[prev]" \
+      -map "[rec]" "${map_a[@]}" "${ENC_ARGS[@]}" "${audio_out[@]}" -fps_mode cfr -r "$CAP_FPS" "$out" \
+      -map "[prev]" -an -c:v rawvideo -f nut pipe:1 </dev/null &
+  else
+    setsid ffmpeg -nostdin -hide_banner -loglevel warning -stats \
+      -f v4l2 -use_wallclock_as_timestamps 1 -video_size "${WIDTH}x${HEIGHT}" -framerate "$CAP_FPS" -i "$VIDEO_DEV" \
+      "${audio_in[@]}" \
+      "${ENC_ARGS[@]}" "${audio_out[@]}" -fps_mode cfr -r "$CAP_FPS" "$out" </dev/null &
+  fi
+  local job=$!
+  set_state recording "$out" "$CAP_FPS"
+  if [ "$HEADLESS" = 1 ]; then notify "Recording started" "$(basename "$out")"; fi
+  supervise "$job" "$player_pid"
+  set_state idle
+  if [ -n "$player_pid" ]; then kill -TERM -- "-$player_pid" 2>/dev/null; fi
+  if [ -n "$fifo" ]; then rm -f "$fifo"; fi
+  set_name camera
+  if [ "$FORCED" = 1 ] && [ -s "$out" ]; then repair_recording "$out"; fi
+  echo
+  if [ -s "$out" ]; then
+    local secs
+    secs="$(ffprobe -v error -show_entries format=duration -of default=nw=1:nk=1 "$out" 2>/dev/null)"
+    local summary
+    summary="$(du -h "$out" | cut -f1), $(awk -v s="${secs:-0}" 'BEGIN { s = int(s + 0.5); printf "%d:%02d:%02d", s / 3600, (s % 3600) / 60, s % 60 }')"
+    gum style --foreground "$GREEN" "Saved: $out ($summary)"
+    if [ "$HEADLESS" = 1 ]; then notify "Recording saved" "$(basename "$out") ($summary)"; fi
+  else
+    gum style --foreground "$RED" "No recording was written."
+    if [ "$HEADLESS" = 1 ]; then notify "Camera" "No recording was written"; fi
+  fi
+  pause
 }
 
-cmd_record() {
-    mkdir -p "$RECORD_DIR"
-    wait_for_rtmp
-    local outfile="$RECORD_DIR/recording_$(date +%Y%m%d_%H%M%S).mkv"
-    echo "Recording -> $outfile (Ctrl+C to stop)"
-    ffmpeg -i "$RTMP_URL" -c copy -f matroska "$outfile"
+# mpv --vo=kitty leaves mouse reporting on; reset cleans up, then back to the alternate screen
+reset_terminal() {
+  reset
+  tput smcup 2>/dev/null && ALT=1
+  quiet_tty
 }
 
-cmd_stop() {
-    pkill -f "video${VIDEO_NR}" 2>/dev/null || true
-    sleep 1
-    sudo modprobe -r v4l2loopback 2>/dev/null || true
-    echo "Relay stopped, loopback unloaded. (VM keeps running -- to stop it: docker compose -f $COMPOSE_FILE down)"
+play_recording() {
+  command -v mpv >/dev/null || {
+    gum style --foreground "$YELLOW" "mpv is missing (sudo pacman -S mpv)"
+    pause
+    return
+  }
+  local files=() f
+  mapfile -t files < <(ls -1t "$REC_DIR"/*.mkv 2>/dev/null)
+  if [ ${#files[@]} -eq 0 ]; then
+    info "No recordings in $REC_DIR."
+    pause
+    return
+  fi
+  f="$(printf '%s\n' "${files[@]##*/}" | choose "Recording to play (newest first)")" || return
+  set_name camera-play
+  if [ -n "${KITTY_WINDOW_ID:-}" ] && [ -z "${TMUX:-}" ]; then
+    mpv --profile=sw-fast --vo=kitty --really-quiet "$REC_DIR/$f"
+    reset_terminal
+  else
+    mpv --really-quiet "$REC_DIR/$f"
+  fi
+  set_name camera
 }
 
-cmd_status() {
-    echo ""
-    echo "--- v4l2loopback ---"
-    lsmod | grep v4l2loopback || echo "not loaded"
-    echo ""
-    echo "--- relay process ---"
-    pgrep -af "video${VIDEO_NR}" || echo "no relay active"
-    echo ""
-    echo "--- VM container ---"
-    docker ps --filter "name=tiny11" --format "table {{.Names}}\t{{.Status}}"
+stream_headless() {
+  STOP=0
+  set_state streaming
+  notify "Streaming mode" "Camera \"LGX2\" ($VIDEO_DEV) is ready"
+  while [ "$STOP" = 0 ]; do
+    if [ -n "$DAEMON_PID" ] && ! kill -0 "$DAEMON_PID" 2>/dev/null; then
+      notify "Camera" "lgx2d stopped"
+      break
+    fi
+    read -rt 1 <> <(:) 2>/dev/null || true
+  done
 }
 
-case "${1:-}" in
-    start)  cmd_start ;;
-    rdp)    cmd_rdp ;;
-    live)   cmd_live ;;
-    webcam) cmd_webcam ;;
-    record) cmd_record ;;
-    stop)   cmd_stop ;;
-    status) cmd_status ;;
-    *)      usage ;;
-esac
+# Keeps lgx2d running for programs that read the camera
+stream_mode() {
+  local name last="" now key rc
+  name="$(v4l2-ctl -d "$VIDEO_DEV" --info 2>/dev/null | sed -n 's/^[[:space:]]*Card type[[:space:]]*:[[:space:]]*//p')"
+  name="${name:-LGX2}"
+  set_name camera-stream
+  STOP=0
+  set_state streaming
+  while [ "$STOP" = 0 ]; do
+    now="$(signal_text)"
+    if [ "$now" != "$last" ]; then
+      last="$now"
+      draw_header
+      gum style --foreground "$TEXT" \
+        "Streaming mode: lgx2d keeps running, this script reads nothing." "" \
+        "  Video  camera \"$name\" ($VIDEO_DEV)" \
+        "  Audio  PipeWire source \"LGX2 Audio\" (optional)" ""
+      gum style --foreground "$YELLOW" "Only one program can use the camera at a time."
+      gum style --foreground "$YELLOW" "Keep this screen open while the camera is in use."
+      echo
+      gum style --foreground "$OVERLAY0" "Press Enter or q to stop."
+    fi
+    read -rsn1 -t 1 key
+    rc=$?
+    if [ "$rc" -eq 0 ]; then
+      case "$key" in "" | q | Q) break ;; esac
+    elif [ "$rc" -eq 130 ]; then
+      break
+    fi
+  done
+  set_state idle
+  set_name camera
+}
+
+status() {
+  draw_header
+  {
+    echo "Script:  camera v$VERSION"
+    echo "USB:     $(lsusb -d "$USB_ID" || echo 'card not found')"
+    echo "Signal:  $(signal_text)"
+    echo "Device:  $VIDEO_DEV ($(v4l2-ctl -d "$VIDEO_DEV" --get-fmt-video 2>/dev/null | tr -s ' ' | grep -E 'Width|Pixel Format' | tr '\n' ' '))"
+    if [ -n "$DAEMON_PID" ]; then
+      echo "lgx2d:   started by this script (log: $LOG)"
+    else
+      echo "lgx2d:   started elsewhere"
+    fi
+  } | gum style --border rounded --border-foreground "$MAUVE" --foreground "$TEXT" --padding "0 1"
+  if [ -n "$DAEMON_PID" ] && confirm "Show the last lines of the lgx2d log?"; then
+    tail -n 20 "$LOG"
+  fi
+  echo
+  pause
+}
+
+# --- Commands
+handle_command() {
+  local pid
+  case "${1:-}" in
+    -V | --version)
+      echo "camera v$VERSION"
+      exit 0
+      ;;
+    help | -h | --help)
+      echo "camera v$VERSION - GC551 on demand: live view, recording, playback, streaming"
+      echo "Usage: camera [live|record|stream|menu|stop|state|-V|--version|help|-h|--help]"
+      echo ""
+      echo "  (no argument)       open the menu in the terminal"
+      echo "  menu                qmenu menu (launcher, key binding), the commands below run in the background"
+      echo "  live|record|stream  start in the background without a menu (stop with: camera stop)"
+      echo "  stop                end the running live view, recording or streaming"
+      echo "  state               print the state of the running script"
+      echo ""
+      echo "Settings: $CONF"
+      exit 0
+      ;;
+    menu) qmenu_menu ;;
+    stop)
+      pid="$(state_alive)" || {
+        echo "camera: not running" >&2
+        exit 1
+      }
+      if [ "$(state_get mode)" = idle ]; then
+        echo "camera: nothing to stop" >&2
+        exit 0
+      fi
+      kill -USR1 "$pid"
+      exit 0
+      ;;
+    state)
+      state_alive >/dev/null || {
+        echo "camera: not running" >&2
+        exit 1
+      }
+      cat "$STATE_FILE"
+      exit 0
+      ;;
+    live | record | stream)
+      if state_alive >/dev/null; then
+        notify "Camera is already running" "Stop it first (camera stop)"
+        echo "camera: already running" >&2
+        exit 1
+      fi
+      if [ -z "${CAMERA_DETACHED:-}" ]; then
+        CAMERA_DETACHED=1 setsid -f "$(readlink -f "${BASH_SOURCE[0]}")" "$1" </dev/null >/dev/null 2>&1
+        exit 0
+      fi
+      HEADLESS=1
+      HMODE="$1"
+      ;;
+    "") ;;
+    *)
+      echo "camera: unknown command: $1 (try --help)" >&2
+      exit 2
+      ;;
+  esac
+}
+
+# --- main
+handle_command "$@"
+
+trap cleanup EXIT
+trap 'STOP=1' INT
+trap 'STOP=1' USR1 # camera stop
+trap 'exit 143' TERM
+
+if [ "$HEADLESS" = 1 ]; then
+  mkdir -p "$STATE_DIR"
+  exec >>"$STATE_DIR/headless.log" 2>&1
+  echo "--- $(date '+%F %T') camera $HMODE"
+  check_tools
+  card_present || die "Capture card ($USB_ID) not found. Check the cable and the USB port."
+  [ -e "$VIDEO_DEV" ] || die "$VIDEO_DEV does not exist. Load v4l2loopback first."
+  start_daemon
+  case "$HMODE" in
+    live) live_view ;;
+    record) record no-preview ;;
+    stream) stream_headless ;;
+  esac
+  exit 0
+fi
+
+check_tools
+enter_screen
+set_name camera
+draw_banner
+card_present || die "Capture card ($USB_ID) not found. Check the cable and the USB port."
+ensure_loopback
+start_daemon
+set_state idle
+
+while true; do
+  draw_header
+  choice="$(choose "What would you like to do?" \
+    "Live view" "Record" "Live view + record" "Play recording" "Streaming (Zoom, browser, OBS)" "Status" "Quit")" || break
+  case "$choice" in
+    "Live view") live_view ;;
+    "Record") record no-preview ;;
+    "Live view + record") record with-preview ;;
+    "Play recording") play_recording ;;
+    "Streaming (Zoom, browser, OBS)") stream_mode ;;
+    "Status") status ;;
+    *) break ;;
+  esac
+done
+
+leave_screen
+if [ -n "$DAEMON_PID" ]; then info "Releasing the card ..."; fi
