@@ -274,7 +274,7 @@ show_help() {
 
 # If no argument, show the menu
 if [ -z "${1:-}" ]; then
-  CHOICE=$(printf " \nFull Screen\nSelect Area\nActive Window\n \nGoto 󰹑 screenshot" | qmenu -noi -c -bw 2 -l 6 -p " record" -i -nb "#11111b" -nf "#a6adc8" -sb "#1e1e2e" -sf "#cdd6f4")
+  CHOICE=$(printf " \nFull Screen\nSelect Area\nActive Window\n \nGoto 󰹑 screenshot" | qmenu -noi -c -bw 2 -l 6 -p " record" -i -nb "#11111b" -nf "#a6adc8" -sb "#1e1e2e" -sf "#cdd6f4")
   case "$CHOICE" in
     "Full Screen") record_screen ;;
     "Select Area") record_area ;;
