@@ -49,6 +49,7 @@ init_paths() {
   XDG_CACHE_HOME="${XDG_CACHE_HOME:-$HOME/.cache}"
   PID_FILE="$XDG_CACHE_HOME/screenrecord.pid"
   STATE_FILE="$XDG_CACHE_HOME/screenrecord.state"
+  FILE_FILE="$XDG_CACHE_HOME/screenrecord.file"
   LOG_FILE="$XDG_CACHE_HOME/screenrecord.log"
   OUTDIR="${XDG_VIDEOS_DIR:-$HOME/Videos}/recordings"
   mkdir -p "$OUTDIR"
@@ -89,7 +90,7 @@ update_status() {
 
 # Define cleanup early
 cleanup() {
-  rm -f "$PID_FILE" "$STATE_FILE"
+  rm -f "$PID_FILE" "$STATE_FILE" "$FILE_FILE"
   update_status
 }
 
@@ -199,6 +200,7 @@ start_recording() {
   local pid=$!
   echo "$pid" >"$PID_FILE"
   echo "recording" >"$STATE_FILE"
+  echo "$FILENAME" >"$FILE_FILE"
   update_status
   if [ -n "$pid" ]; then
     wait "$pid" || true
@@ -238,12 +240,15 @@ start_wf() {
 record_stop() {
   PID=$(is_recording_running)
   if [ -n "$PID" ]; then
+    local file
+    file="$(cat "$FILE_FILE" 2>/dev/null || true)"
+    file="${file:-$FILENAME}"
     # wf-recorder finalizes the file on SIGINT, ffmpeg handles SIGTERM
     local sig=TERM
     [ "$WAYLAND" -eq 1 ] && sig=INT
     if kill -"$sig" "$PID"; then
-      notify-send "Recording stopped" "$(basename "$FILENAME")" || true
-      echo "Recording stopped → $FILENAME"
+      notify-send "Recording stopped" "$(basename "$file")" || true
+      echo "Recording stopped → $file"
       cleanup
       exit 0
     else
