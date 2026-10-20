@@ -147,14 +147,15 @@ send_notification() {
 # Show the menu if no argument is passed
 # Delay to allow qmenu to close before capturing
 if [ -z "$1" ]; then
-  CHOICE=$(printf " \nFull Screen\nSelect Area\nActive Window\n \nColor Picker\nQR Secret Key\n \nGoto  record" | qmenu -noi -c -bw 2 -l 9 -p "󰹑 screenshot" -i -nb "#11111b" -nf "#a6adc8" -sb "#1e1e2e" -sf "#cdd6f4")
+  CHOICE=$(printf " \nFull Screen\nSelect Area\nActive Window\n \nColor Picker\nQR Secret Key\n \nGoto  record\nGoto 󰄀 camera" | qmenu -noi -c -bw 2 -l 10 -p "󰹑 screenshot" -i -nb "#11111b" -nf "#a6adc8" -sb "#1e1e2e" -sf "#cdd6f4")
   case "$CHOICE" in
     "Full Screen") (sleep 0.3 && take_screenshot full) & ;;
     "Select Area") (sleep 0.3 && take_screenshot area) & ;;
     "Active Window") (sleep 0.3 && take_screenshot window) & ;;
     "Color Picker") (sleep 0.3 && colorpicker) & ;;
     "QR Secret Key") (sleep 0.3 && qr2totp) & ;;
-    "Goto  record") record & ;;
+    "Goto  record") record & ;;
+    "Goto 󰄀 camera") camera menu & ;;
     *) exit 0 ;;
   esac
 else
