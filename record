@@ -26,16 +26,16 @@ WF_COLOR=(
 _ENCODERS=$(ffmpeg -encoders 2>/dev/null)
 if echo "$_ENCODERS" | grep -q h264_nvenc; then
   # NVIDIA GPU available
-  CODEC_VID="h264_nvenc -rc vbr -cq 18 -b:v 0"
+  CODEC_VID=(h264_nvenc -rc vbr -cq 18 -b:v 0)
   WF_VIDEO=(-c h264_nvenc -p rc=vbr -p cq=18 -p b=0)
   FRAMERATE=60
 elif echo "$_ENCODERS" | grep -q h264_amf; then
   # AMD GPU available
-  CODEC_VID="h264_amf -quality balanced -rc cqp -qp_i 18 -qp_p 18"
+  CODEC_VID=(h264_amf -quality balanced -rc cqp -qp_i 18 -qp_p 18)
   FRAMERATE=60
 else
   # CPU fallback (Raspberry Pi, etc.)
-  CODEC_VID="libx264 -preset ultrafast -crf 23"
+  CODEC_VID=(libx264 -preset ultrafast -crf 23)
   FRAMERATE=30
 fi
 unset _ENCODERS
@@ -43,6 +43,7 @@ unset _ENCODERS
 init_paths() {
   # Load XDG user dirs for standard folders
   USER_DIRS="${XDG_CONFIG_HOME:-$HOME/.config}/user-dirs.dirs"
+  # shellcheck source=/dev/null
   [ -f "$USER_DIRS" ] && source "$USER_DIRS"
 
   # Define paths and filenames
@@ -218,7 +219,7 @@ start_ffmpeg() {
     -f pulse -i "$AUDIO_SRC" \
     -vf "format=yuv420p" \
     -colorspace bt709 -color_primaries bt709 -color_trc bt709 -color_range pc \
-    -c:v $CODEC_VID -c:a "$CODEC_AUD" -b:a 256k "$FILENAME" &
+    -c:v "${CODEC_VID[@]}" -c:a "$CODEC_AUD" -b:a 256k "$FILENAME" &
   notify-send -t 2000 "$3" "$(basename "$FILENAME")" || true
   echo "$3 → $FILENAME"
   start_recording
